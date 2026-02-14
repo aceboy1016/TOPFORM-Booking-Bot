@@ -527,24 +527,6 @@ class LINEService:
                     user_id, store, slot_datetime, "provisional"
                 )
 
-                # Create event in Google Calendar (Provisional Block)
-                display_name = user.get("display_name", "ゲスト")
-                dt = datetime.fromisoformat(slot_datetime)
-                end_dt = dt + timedelta(minutes=60) # Assuming 60 min session
-                
-                cal_event_id = calendar_service.create_calendar_event(
-                    title=f"【仮】{display_name} 様 (LINE予約)",
-                    start_dt=dt,
-                    end_dt=end_dt,
-                    store=store,
-                    description=f"LINE Bot受付 (ID: {booking_id})\nステータス: 仮予約"
-                )
-                
-                if cal_event_id:
-                    print(f"📅 Provisional event created: {cal_event_id}")
-                else:
-                    print("⚠️ Failed to create provisional event in Google Calendar")
-
                 # Clear session
                 await db.clear_session(user_id)
                 self._invalidate_cache()

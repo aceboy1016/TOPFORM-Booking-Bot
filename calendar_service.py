@@ -100,7 +100,7 @@ class CalendarService:
         creds_data = json.loads(creds_json)
         credentials = service_account.Credentials.from_service_account_info(
             creds_data,
-            scopes=["https://www.googleapis.com/auth/calendar"],
+            scopes=["https://www.googleapis.com/auth/calendar.readonly"],
         )
         self._service = build("calendar", "v3", credentials=credentials)
         print("✅ Google Calendar Service initialized")
