@@ -100,7 +100,7 @@ class CalendarService:
         creds_data = json.loads(creds_json)
         credentials = service_account.Credentials.from_service_account_info(
             creds_data,
-            scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+            scopes=["https://www.googleapis.com/auth/calendar"],
         )
         self._service = build("calendar", "v3", credentials=credentials)
         print("✅ Google Calendar Service initialized")
@@ -231,6 +231,50 @@ class CalendarService:
         data.last_update = datetime.now(JST).isoformat()
 
         return data
+
+    def create_calendar_event(
+        self,
+        title: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        store: str,
+        description: str = "",
+    ) -> Optional[str]:
+        """Create a new event in the specified calendar."""
+        if not self._service:
+            self.initialize()
+
+        # Always add provisional booking to Ishihara's work calendar
+        calendar_id = CALENDAR_IDS["ishihara_work"]
+        
+        if not calendar_id:
+            print(f"❌ Unknown store: {store}")
+            return None
+
+        event = {
+            "summary": title,
+            "description": description,
+            "start": {
+                "dateTime": start_dt.isoformat(),
+                "timeZone": "Asia/Tokyo",
+            },
+            "end": {
+                "dateTime": end_dt.isoformat(),
+                "timeZone": "Asia/Tokyo",
+            },
+        }
+
+        try:
+            created_event = (
+                self._service.events()
+                .insert(calendarId=calendar_id, body=event)
+                .execute()
+            )
+            print(f"✅ Created event: {created_event.get('htmlLink')}")
+            return created_event.get("id")
+        except Exception as e:
+            print(f"❌ Failed to create event: {e}")
+            return None
 
 
 # ============================================================
