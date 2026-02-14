@@ -13,6 +13,7 @@ from linebot.v3.webhooks import (
     MessageEvent,
     FollowEvent,
     TextMessageContent,
+    PostbackEvent,
 )
 from linebot.v3 import WebhookParser
 
@@ -120,19 +121,23 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
 async def process_event(event):
     """Process a single LINE event."""
     try:
+        user_id = event.source.user_id
+        
+        # Get or create user for all event types
+        # This ensures we have display_name even for postbacks
+        display_name = await line_service.get_user_profile(user_id)
+        user = await db.get_or_create_user(user_id, display_name)
+
         if isinstance(event, FollowEvent):
             await line_service.handle_follow_event(event)
 
         elif isinstance(event, MessageEvent):
-            user_id = event.source.user_id
-
-            # Get or create user
-            display_name = await line_service.get_user_profile(user_id)
-            user = await db.get_or_create_user(user_id, display_name)
-
             # Handle text messages
             if isinstance(event.message, TextMessageContent):
                 await line_service.handle_text_message(event, user)
+        
+        elif isinstance(event, PostbackEvent):
+            await line_service.handle_postback_event(event, user)
 
     except Exception as e:
         print(f"Error processing event: {e}")

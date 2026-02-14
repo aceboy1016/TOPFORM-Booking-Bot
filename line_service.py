@@ -137,6 +137,57 @@ class LINEService:
         )
 
     # ============================================================
+    # Postback handler
+    # ============================================================
+    async def handle_postback_event(self, event, user: dict):
+        """Handle postback events (button clicks)."""
+        data = json.loads(event.postback.data)
+        action = data.get("action")
+        user_id = event.source.user_id
+        reply_token = event.reply_token
+
+        if action == "cancel_request":
+            booking_id = data.get("booking_id")
+            booking_date = data.get("date")
+            store_name = data.get("store")
+            
+            # Cancel in DB
+            success = await db.cancel_booking(booking_id, user_id)
+            
+            if success:
+                # Notify User
+                await self.reply_text(
+                    reply_token,
+                    f"✅ 予約のキャンセル申請を受け付けました。\n\n"
+                    f"📅 {booking_date}\n"
+                    f"📍 {store_name}\n\n"
+                    f"またのご予約をお待ちしております！👋"
+                )
+                
+                # Notify Admin
+                if settings.ADMIN_USER_ID:
+                    display_name = user.get("display_name", "Unknown")
+                    admin_msg = (
+                        f"🗑️ 予約キャンセル申請\n"
+                        f"👤 {display_name}\n"
+                        f"📅 {booking_date}\n"
+                        f"📍 {store_name}\n"
+                        f"🎫 No. {booking_id}\n\n"
+                        f"⚠️ hacomono/カレンダーの予定を削除してください！"
+                    )
+                    try:
+                        await self.push_text(settings.ADMIN_USER_ID, admin_msg)
+                    except Exception as e:
+                        print(f"Admin notification failed: {e}")
+                
+                self._invalidate_cache()
+            else:
+                await self.reply_text(
+                    reply_token,
+                    "⚠️ すでにキャンセルされているか、予約が見つかりませんでした。"
+                )
+
+    # ============================================================
     # Main message handler
     # ============================================================
     async def handle_text_message(self, event, user: dict):
@@ -603,22 +654,24 @@ class LINEService:
                 )
 
     # ============================================================
-    # Show user bookings
+    # Show user bookings (Flex Message)
     # ============================================================
     async def _show_user_bookings(
         self, reply_token: str, user_id: str, user: dict
     ):
-        """Show the user's upcoming and past bookings."""
-        # Get from local DB
+        """Show the user's upcoming bookings with cancel options."""
+        # Get from local DB (Provisional/Confirmed)
         upcoming = await db.get_user_bookings(user_id, include_past=False)
-        past = await db.get_user_bookings(user_id, include_past=True)
-
-        # Also try to find bookings in Google Calendar by name
+        
+        # Calendar bookings (Legacy/Manual)
         display_name = user.get("display_name", "")
         cal_bookings = []
         if display_name and display_name != "Unknown":
             bookings = await self._get_bookings()
             cal_bookings = find_user_bookings(display_name, bookings)
+            # Filter future only
+            now = datetime.now(JST)
+            cal_bookings = [b for b in cal_bookings if b.start_dt > now]
 
         if not upcoming and not cal_bookings:
             await self.reply_text(
@@ -627,36 +680,188 @@ class LINEService:
             )
             return
 
-        # Build response
-        lines = [f"📖 {user.get('display_name', 'あなた')}さんの予約\n"]
+        # Build Flex Message Bubble for each booking
+        bubbles = []
 
-        # Upcoming from local DB
-        if upcoming:
-            lines.append("━━ 📅 申請中の予約 ━━")
-            for b in upcoming:
-                dt = datetime.fromisoformat(b["slot_datetime"])
-                date_s = dt.strftime("%m/%d")
-                wd = WEEKDAY_JP[dt.weekday()]
-                time_s = dt.strftime("%H:%M")
-                store_name = STORE_NAMES.get(b["store"], b["store"])
-                status_mark = " (仮)" if b.get("status") == "provisional" else ""
-                lines.append(f"  {date_s}({wd}) {time_s} @{store_name}{status_mark}")
+        # 1. DB Bookings
+        for b in upcoming:
+            dt = datetime.fromisoformat(b["slot_datetime"])
+            date_s = dt.strftime("%m/%d")
+            wd = WEEKDAY_JP[dt.weekday()]
+            time_s = dt.strftime("%H:%M")
+            store_name = STORE_NAMES.get(b["store"], b["store"])
+            status_text = "仮予約" if b.get("status") == "provisional" else "予約中"
+            status_color = "#ff9f1c" if b.get("status") == "provisional" else "#2ec4b6"
+            
+            bubbles.append({
+                "type": "bubble",
+                "size": "mega",
+                "header": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": status_text,
+                            "color": "#ffffff",
+                            "weight": "bold",
+                            "size": "xs",
+                            "backgroundColor": status_color,
+                            "paddingAll": "3px",
+                            "cornerRadius": "sm",
+                            "align": "start",
+                            "flex": 0,
+                            "offsetTop": "-5px"
+                        },
+                        {
+                            "type": "text",
+                            "text": f"{date_s} ({wd})",
+                            "weight": "bold",
+                            "size": "xl",
+                            "color": "#1a1a2e",
+                            "margin": "sm"
+                        },
+                        {
+                            "type": "text",
+                            "text": f"{time_s} 〜",
+                            "size": "lg",
+                            "color": "#1a1a2e",
+                        }
+                    ],
+                    "backgroundColor": "#f8f9fa"
+                },
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "box",
+                            "layout": "baseline",
+                            "contents": [
+                                {"type": "text", "text": "📍", "flex": 1, "size": "sm"},
+                                {"type": "text", "text": store_name, "flex": 8, "size": "sm", "weight": "bold"}
+                            ]
+                        },
+                        {
+                            "type": "box",
+                            "layout": "baseline",
+                            "margin": "md",
+                            "contents": [
+                                {"type": "text", "text": "🎫", "flex": 1, "size": "sm"},
+                                {"type": "text", "text": f"No. {b['id']}", "flex": 8, "size": "xs", "color": "#aaaaaa"}
+                            ]
+                        }
+                    ],
+                    "paddingAll": "20px"
+                },
+                "footer": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "action": {
+                                "type": "postback",
+                                "label": "キャンセル申請",
+                                "data": json.dumps({
+                                    "action": "cancel_request",
+                                    "booking_id": b["id"],
+                                    "date": f"{date_s} {time_s}",
+                                    "store": store_name
+                                })
+                            },
+                            "style": "secondary",
+                            "color": "#e63946",
+                            "height": "sm"
+                        }
+                    ],
+                    "paddingAll": "15px"
+                }
+            })
 
-        # Calendar-based bookings
-        if cal_bookings:
-            now = datetime.now(JST)
-            future_cal = [b for b in cal_bookings if b.start_dt > now]
-            if future_cal:
-                lines.append("\n━━ 📋 カレンダー上の予約 ━━")
-                for b in future_cal[:10]:
-                    dt = b.start_dt
-                    date_s = dt.strftime("%m/%d")
-                    wd = WEEKDAY_JP[dt.weekday()]
-                    time_s = dt.strftime("%H:%M")
-                    store_name = STORE_NAMES.get(b.store, "")
-                    lines.append(f"  {date_s}({wd}) {time_s} @{store_name}")
+        # 2. Calendar Bookings (Cannot cancel automatically, show distinct)
+        for b in cal_bookings:
+            dt = b.start_dt
+            date_s = dt.strftime("%m/%d")
+            wd = WEEKDAY_JP[dt.weekday()]
+            time_s = dt.strftime("%H:%M")
+            store_name = STORE_NAMES.get(b.store, "")
+            
+            bubbles.append({
+                "type": "bubble",
+                "size": "mega",
+                "header": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "カレンダー同期",
+                            "color": "#ffffff",
+                            "weight": "bold",
+                            "size": "xs",
+                            "backgroundColor": "#cccccc",
+                            "paddingAll": "3px",
+                            "cornerRadius": "sm",
+                            "align": "start",
+                            "flex": 0,
+                            "offsetTop": "-5px"
+                        },
+                        {
+                            "type": "text",
+                            "text": f"{date_s} ({wd})",
+                            "weight": "bold",
+                            "size": "xl",
+                            "color": "#1a1a2e",
+                            "margin": "sm"
+                        },
+                        {
+                            "type": "text",
+                            "text": f"{time_s} 〜",
+                            "size": "lg",
+                            "color": "#1a1a2e",
+                        }
+                    ],
+                    "backgroundColor": "#f0f0f0"
+                },
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "box",
+                            "layout": "baseline",
+                            "contents": [
+                                {"type": "text", "text": "📍", "flex": 1, "size": "sm"},
+                                {"type": "text", "text": store_name, "flex": 8, "size": "sm", "weight": "bold"}
+                            ]
+                        }
+                    ],
+                    "paddingAll": "20px"
+                },
+                "footer": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                         {
+                            "type": "text",
+                            "text": "※変更は直接ご連絡ください",
+                            "size": "xs",
+                            "color": "#aaaaaa",
+                            "align": "center"
+                        }
+                    ],
+                    "paddingAll": "15px"
+                }
+            })
 
-        await self.reply_text(reply_token, "\n".join(lines))
+        # Create Carousel
+        carousel = {
+            "type": "carousel",
+            "contents": bubbles
+        }
+
+        await self.reply_flex(reply_token, "あなたの予約一覧", carousel)
 
     # ============================================================
     # Hayamihyo link
