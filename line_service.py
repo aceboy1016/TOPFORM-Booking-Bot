@@ -522,9 +522,9 @@ class LINEService:
 
                 slot_datetime = f"{date_str}T{time_str}:00+09:00"
 
-                # Save booking
+                # Save booking as provisional (仮予約)
                 booking_id = await db.save_booking(
-                    user_id, store, slot_datetime, "confirmed"
+                    user_id, store, slot_datetime, "provisional"
                 )
 
                 # Clear session
@@ -539,12 +539,15 @@ class LINEService:
                 time_range = f"{hour:02d}:00〜{hour + 1:02d}:00"
 
                 success_msg = (
-                    f"✅ 予約が確定しました！\n\n"
+                    f"📩 仮予約を受け付けました！\n\n"
                     f"📅 {display_date}（{wd}）\n"
                     f"🕐 {time_range}\n"
                     f"📍 {STORE_NAMES[store]}\n"
-                    f"🎫 予約No. {booking_id}\n\n"
-                    f"お待ちしています💪✨"
+                    f"🎫 受付No. {booking_id}\n\n"
+                    f"⚠️ まだ予約は確定ではありません。\n\n"
+                    f"管理者がhacomonoの空き状況を確認し、"
+                    f"正式に予約を確定してからご連絡いたします。\n"
+                    f"今しばらくお待ちください🙇‍♂️"
                 )
 
                 await self.reply_text(event_reply_token_unused := reply_token, success_msg)
@@ -553,11 +556,13 @@ class LINEService:
                 if settings.ADMIN_USER_ID:
                     display_name = user.get("display_name", "Unknown")
                     admin_msg = (
-                        f"📢 新規予約\n"
+                        f"📢 新規・仮予約申請\n"
                         f"👤 {display_name}\n"
                         f"📅 {display_date}（{wd}）{time_range}\n"
                         f"📍 {STORE_NAMES[store]}\n"
-                        f"🎫 No. {booking_id}"
+                        f"🎫 No. {booking_id}\n\n"
+                        f"⚠️ hacomonoで予約枠を確保し、\n"
+                        f"ユーザーへ確定連絡をしてください！"
                     )
                     try:
                         await self.push_text(settings.ADMIN_USER_ID, admin_msg)
@@ -627,14 +632,15 @@ class LINEService:
 
         # Upcoming from local DB
         if upcoming:
-            lines.append("━━ 📅 今後の予約 ━━")
+            lines.append("━━ 📅 申請中の予約 ━━")
             for b in upcoming:
                 dt = datetime.fromisoformat(b["slot_datetime"])
                 date_s = dt.strftime("%m/%d")
                 wd = WEEKDAY_JP[dt.weekday()]
                 time_s = dt.strftime("%H:%M")
                 store_name = STORE_NAMES.get(b["store"], b["store"])
-                lines.append(f"  {date_s}({wd}) {time_s} @{store_name}")
+                status_mark = " (仮)" if b.get("status") == "provisional" else ""
+                lines.append(f"  {date_s}({wd}) {time_s} @{store_name}{status_mark}")
 
         # Calendar-based bookings
         if cal_bookings:
