@@ -35,6 +35,7 @@ from calendar_service import (
     find_user_bookings,
     BookingData,
 )
+from sheets_service import sheets_service
 
 JST = pytz.timezone("Asia/Tokyo")
 
@@ -146,6 +147,13 @@ class LINEService:
         user_id = event.source.user_id
         reply_token = event.reply_token
 
+        # Enrich user info from Sheets
+        customer = sheets_service.get_customer_by_line_id(user_id)
+        if customer:
+            user["display_name"] = customer["name"]
+            user["store_pref"] = customer.get("store_pref")
+            user["room_pref"] = customer.get("room_pref")
+
         if action == "cancel_request":
             booking_id = data.get("booking_id")
             booking_date = data.get("date")
@@ -195,6 +203,13 @@ class LINEService:
         text = event.message.text.strip()
         user_id = event.source.user_id
         reply_token = event.reply_token
+
+        # Enrich user info from Sheets
+        customer = sheets_service.get_customer_by_line_id(user_id)
+        if customer:
+            user["display_name"] = customer["name"]
+            user["store_pref"] = customer.get("store_pref")
+            user["room_pref"] = customer.get("room_pref")
 
         # Check for active session
         session = await db.get_session(user_id)

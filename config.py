@@ -37,6 +37,9 @@ class Settings:
     # Database (予約履歴用)
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "./topform_line.db")
 
+    # Google Sheets (顧客マスタ)
+    GOOGLE_SHEET_ID: str = os.getenv("GOOGLE_SHEET_ID", "17jOb7Jh8xIlsmG9RJjdc0GUKykBVxEVkxpyw92sWkjk")
+
     @classmethod
     def validate(cls) -> list[str]:
         """Validate required settings and return list of missing ones."""
