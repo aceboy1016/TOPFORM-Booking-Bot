@@ -131,7 +131,7 @@ class CalendarService:
                  start_dt = datetime.fromisoformat(start["dateTime"])
             elif start.get("date"):
                 # All-day event logic
-                if any(k in title for k in settings.BLOCKING_KEYWORDS):
+                if any(k in title for k in BLOCKING_KEYWORDS):
                     start_dt = datetime.strptime(start["date"], "%Y-%m-%d").replace(tzinfo=JST)
                 else:
                     return None # Ignore non-blocking all-day
@@ -142,7 +142,7 @@ class CalendarService:
                 end_dt = datetime.fromisoformat(end["dateTime"])
             elif end.get("date"):
                 end_dt = datetime.strptime(end["date"], "%Y-%m-%d").replace(tzinfo=JST)
-                if not any(k in title for k in settings.BLOCKING_KEYWORDS):
+                if not any(k in title for k in BLOCKING_KEYWORDS):
                      return None # Ignore non-blocking
 
             # Parse Room (Ebisu only)
@@ -174,7 +174,7 @@ class CalendarService:
         now = datetime.now(JST)
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
         time_min = today.isoformat()
-        time_max = (today + timedelta(days=settings.ADVANCE_BOOKING_MONTHS * 30)).isoformat()
+        time_max = (today + timedelta(days=ADVANCE_BOOKING_MONTHS * 30)).isoformat()
 
         # Fetch raw events
         ebisu_events = self._fetch_events(CALENDAR_IDS["ebisu"], time_min, time_max)
@@ -259,7 +259,7 @@ def get_slot_status(
     for b in bookings:
         if max(slot_time, b.start_dt) < min(slot_end, b.end_dt):
              # Ignore if it's just a hold without details? No, trust store calendar.
-             if any(k in b.title for k in settings.BLOCKING_KEYWORDS):
+             if any(k in b.title for k in BLOCKING_KEYWORDS):
                  return {"is_available": False, "reason": "Blocked", "rooms_available": []}
              overlapping.append(b)
 
