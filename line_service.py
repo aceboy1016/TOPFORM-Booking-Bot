@@ -804,8 +804,28 @@ class LINEService:
 
                 # 3. Success Message
                 if mode == "change":
+                    original_info = session.get("original_booking_info", {})
+                    orig_dt_str = original_info.get("dt", "")
+                    orig_store = original_info.get("store", "")
+                    
+                    orig_text_user = ""
+                    if orig_dt_str:
+                        try:
+                            odt = datetime.fromisoformat(orig_dt_str)
+                            owd = WEEKDAY_JP[odt.weekday()]
+                            orig_text_user = (
+                                f"🔻 変更前\n"
+                                f"📅 {odt.strftime('%m/%d')}（{owd}） {odt.strftime('%H:%M')}\n"
+                                f"📍 {orig_store}\n"
+                                f"⬇️\n\n"
+                                f"✅ 変更後\n"
+                            )
+                        except:
+                            pass
+
                     success_msg = (
                         f"🔄 変更リクエストを受け付けました！\n\n"
+                        f"{orig_text_user}"
                         f"📅 {display_date}（{wd}）\n"
                         f"🕐 {time_range}\n"
                         f"📍 {store_display}\n\n"
