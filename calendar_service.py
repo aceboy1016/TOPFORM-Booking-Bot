@@ -65,8 +65,11 @@ class CalendarService:
     def __init__(self):
         self._service = None
 
-    def initialize(self):
+    async def initialize(self):
         """Initialize the Google Calendar API client."""
+        if self._service:
+            return  # Already initialized
+
         creds_json = settings.GOOGLE_CREDENTIALS_JSON
         if not creds_json:
             print("⚠️ GOOGLE_CREDENTIALS_JSON is not set, skipping Calendar init")
@@ -90,8 +93,9 @@ class CalendarService:
             creds_data,
             scopes=["https://www.googleapis.com/auth/calendar.readonly"],
         )
+        
+        # Build is technically blocking but happens only once at startup
         self._service = build("calendar", "v3", credentials=credentials)
-        print("✅ Google Calendar Service initialized")
 
     def _fetch_events(
         self, calendar_id: str, time_min: str, time_max: str

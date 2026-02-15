@@ -39,13 +39,13 @@ async def lifespan(app: FastAPI):
 
     # Initialize Google Calendar
     try:
-        calendar_service.initialize()
+        await calendar_service.initialize()
         print("✅ Google Calendar Service initialized")
     except Exception as e:
         print(f"⚠️  Calendar Service init failed: {e}")
 
     # Initialize LINE
-    line_service.initialize()
+    await line_service.initialize()
     print("✅ LINE Service initialized")
 
     print("🎉 TOPFORM LINE Bot is ready!")

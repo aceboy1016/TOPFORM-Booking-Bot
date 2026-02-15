@@ -55,13 +55,15 @@ class LINEService:
         self._cache_time: Optional[datetime] = None
         self._cache_ttl = timedelta(minutes=5)  # 5分キャッシュ
 
-    def initialize(self):
+    async def initialize(self):
         """Initialize LINE API clients."""
+        if self._api:
+            return  # Already initialized
+
         config = Configuration(access_token=settings.LINE_CHANNEL_ACCESS_TOKEN)
         self._api_client = AsyncApiClient(config)
         self._api = AsyncMessagingApi(self._api_client)
         self._handler = WebhookHandler(settings.LINE_CHANNEL_SECRET)
-        print("✅ LINE Service initialized")
 
     @property
     def handler(self):
