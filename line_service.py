@@ -1524,6 +1524,7 @@ class LINEService:
         if has_more:
             bubbles.append({
                 "type": "bubble",
+                "size": "kilo",
                 "body": {
                     "type": "box",
                     "layout": "vertical",
