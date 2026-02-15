@@ -41,6 +41,7 @@ JST = pytz.timezone("Asia/Tokyo")
 
 # 曜日の日本語表記
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
+WEEKDAY_EN = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 class LINEService:
@@ -129,12 +130,13 @@ class LINEService:
             ReplyMessageRequest(replyToken=reply_token, messages=messages)
         )
 
-    async def push_text(self, user_id: str, text: str):
-        """Send a push message."""
+    async def push_text(self, to_user_id: str, text: str):
+        """Send a push text message to a user."""
+        message = TextMessage(text=text)
+        from linebot.v3.messaging import PushMessageRequest
+        
         await self._api.push_message(
-            PushMessageRequest(
-                to=user_id, messages=[TextMessage(text=text)]
-            )
+            PushMessageRequest(to=to_user_id, messages=[message])
         )
 
     # ============================================================
@@ -195,6 +197,42 @@ class LINEService:
                     "⚠️ すでにキャンセルされているか、予約が見つかりませんでした。"
                 )
 
+        if action == "change_list_more":
+            offset = data.get("offset", 0)
+            await self._show_booking_change_list(reply_token, user_id, user, offset)
+
+        if action == "select_change_booking":
+            booking_id = data.get("booking_id")
+            b_type = data.get("type")
+            
+            # Start booking flow in "change" mode
+            session_data = {
+                "mode": "change",
+                "target_booking_id": booking_id,
+                "target_booking_type": b_type,
+                # Carry over user preferences
+                "room_pref": user.get("room_pref")
+            }
+            
+            await db.set_session(user_id, "booking", "select_store", json.dumps(session_data))
+            
+            # Store selection QuickReply
+            quick_reply = QuickReply(
+                items=[
+                    QuickReplyItem(
+                        action=MessageAction(label="恵比寿", text="恵比寿")
+                    ),
+                    QuickReplyItem(
+                        action=MessageAction(label="半蔵門", text="半蔵門")
+                    ),
+                ]
+            )
+            await self.reply_text(
+                reply_token,
+                "🔄 変更後の店舗を選んでください。",
+                quick_reply=quick_reply
+            )
+
     # ============================================================
     # Main message handler
     # ============================================================
@@ -211,31 +249,38 @@ class LINEService:
             user["store_pref"] = customer.get("store_pref")
             user["room_pref"] = customer.get("room_pref")
 
-        # Check for active session
-        session = await db.get_session(user_id)
-
-        # ---- Rich Menu / Command triggers ----
-        if text in ["予約する", "予約", "booking"]:
-            await self._start_booking_flow(reply_token, user_id)
-            return
-
-        if text in ["予約確認", "予約一覧", "マイ予約"]:
-            await self._show_user_bookings(reply_token, user_id, user)
-            return
-
-        if text in ["早見表", "スケジュール", "空き状況"]:
-            await self._show_hayamihyo_link(reply_token)
-            return
-
-        if text.lower() in ["id", "id確認", "user_id"]:
+        # Priority Commands (Always available)
+        if text.lower() in ["id", "id確認", "user_id", "admin_id"]:
             await self.reply_text(reply_token, f"あなたのUser ID:\n{user_id}")
             print(f"🆔 User ID: {user_id}")
             return
 
         if text == "キャンセル" or text == "やめる":
             await db.clear_session(user_id)
-            await self.reply_text(reply_token, "操作をキャンセルしました。\n何かあればいつでもどうぞ！👋")
+            await self.reply_text(reply_token, "操作をキャンセルしました。")
             return
+
+        # Check for active session
+        session = await db.get_session(user_id)
+
+        # ---- Rich Menu / Command triggers ----
+        if "予約確認" in text or "予約一覧" in text or "マイ予約" in text:
+            await self._show_user_bookings_simple(reply_token, user_id, user)
+            return
+
+        if "早見表" in text or "スケジュール" in text or "空き状況" in text:
+            await self._show_hayamihyo_link(reply_token)
+            return
+
+        if "予約変更" in text or "変更" in text:
+            await self._show_booking_change_list(reply_token, user_id, user)
+            return
+
+        if "予約" in text or "booking" in text.lower():
+            await self._start_booking_flow(reply_token, user_id, user)
+            return
+            
+        # (Old ID check removed from here)
 
         # ---- Active session flow ----
         if session:
@@ -263,12 +308,13 @@ class LINEService:
         await db.get_or_create_user(user_id, display_name)
 
         welcome = (
-            f"{display_name}さん、友だち追加ありがとうございます！🎉\n\n"
-            f"TOPFORMの予約Bot（石原担当）です💪\n\n"
-            f"📋 早見表 → スケジュールの確認\n"
-            f"📅 予約する → チャットで簡単予約\n"
-            f"📖 予約確認 → あなたの予約一覧\n\n"
-            f"下のメニューからお選びください！"
+            f"【 WELCOME 】\n"
+            f"{display_name}様、友だち追加ありがとうございます。\n\n"
+            f"TOPFORM 予約Bot\n"
+            f"(担当: 石原)\n\n"
+            f"※ Botでの予約は「仮予約」です。\n"
+            f"スタッフが確認後、確定メッセージをお送りします。\n\n"
+            f"以下よりメニューをお選びください。"
         )
         await self.reply_text(event.reply_token, welcome)
 
@@ -392,26 +438,33 @@ class LINEService:
     # ============================================================
     # Booking flow
     # ============================================================
-    async def _start_booking_flow(self, reply_token: str, user_id: str):
+    async def _start_booking_flow(self, reply_token: str, user_id: str, user: dict):
         """Start the interactive booking flow."""
+        # Pre-fill data with user preferences
+        initial_data = {}
+        if user.get("store_pref"):
+            initial_data["store"] = user["store_pref"]
+        if user.get("room_pref"):
+            initial_data["room_pref"] = user["room_pref"]
+
         await db.set_session(
-            user_id, "booking", "select_store", json.dumps({})
+            user_id, "booking", "select_store", json.dumps(initial_data)
         )
 
         quick_reply = QuickReply(
             items=[
                 QuickReplyItem(
-                    action=MessageAction(label="📍 恵比寿店", text="恵比寿店")
+                    action=MessageAction(label="恵比寿", text="恵比寿店")
                 ),
                 QuickReplyItem(
-                    action=MessageAction(label="📍 半蔵門店", text="半蔵門店")
+                    action=MessageAction(label="半蔵門", text="半蔵門店")
                 ),
             ]
         )
 
         await self.reply_text(
             reply_token,
-            "📅 予約を始めます！\n\nまず、店舗を選んでください👇",
+            "店舗を選択してください",
             quick_reply=quick_reply,
         )
 
@@ -437,17 +490,17 @@ class LINEService:
             if not store:
                 await self.reply_text(
                     reply_token,
-                    "店舗を選んでください👇\n「恵比寿店」か「半蔵門店」",
+                    "店舗を選択してください",
                     quick_reply=QuickReply(
                         items=[
                             QuickReplyItem(
                                 action=MessageAction(
-                                    label="📍 恵比寿店", text="恵比寿店"
+                                    label="恵比寿", text="恵比寿店"
                                 )
                             ),
                             QuickReplyItem(
                                 action=MessageAction(
-                                    label="📍 半蔵門店", text="半蔵門店"
+                                    label="半蔵門", text="半蔵門店"
                                 )
                             ),
                         ]
@@ -460,9 +513,10 @@ class LINEService:
                 user_id, "booking", "select_date", json.dumps(data)
             )
 
+            store_name = STORE_NAMES.get(store, store)
             await self.reply_text(
                 reply_token,
-                f"📍 {STORE_NAMES[store]}ですね！\n\n希望の日にちを教えてください。\n例：「2/20」「明日」「来週水曜」",
+                f"■ {store_name}\n\n希望日時を入力してください\n(例: 2.20, 明日, 土曜)",
             )
 
         elif state == "select_date":
@@ -470,7 +524,7 @@ class LINEService:
             if not target_date:
                 await self.reply_text(
                     reply_token,
-                    "📅 日にちがわかりませんでした。\n例：「2/20」「明日」「来週の水曜」\n\nもう一度教えてください！",
+                    "日時が正しくありません。\nもう一度入力してください\n(例: 2.20, 明日)",
                 )
                 return
 
@@ -478,13 +532,14 @@ class LINEService:
             bookings = await self._get_bookings()
             slots = get_available_slots(target_date, store, bookings)
 
-            date_str = target_date.strftime("%m月%d日")
-            wd = WEEKDAY_JP[target_date.weekday()]
+            date_str = target_date.strftime("%m.%d")
+            wd = WEEKDAY_EN[target_date.weekday()]
+            store_name = STORE_NAMES.get(store, store)
 
             if not slots:
                 await self.reply_text(
                     reply_token,
-                    f"😔 {date_str}（{wd}）の{STORE_NAMES[store]}は空きがありません。\n\n別の日を教えてください📅",
+                    f"満席です。\n{date_str} ({wd}) @ {store_name}\n\n別の日時を選択してください。",
                 )
                 return
 
@@ -499,27 +554,26 @@ class LINEService:
                 time_str = slot.strftime("%H:%M")
                 items.append(
                     QuickReplyItem(
-                        action=MessageAction(label=f"🕐 {time_str}", text=time_str)
+                        action=MessageAction(label=f"{time_str}", text=time_str)
                     )
                 )
 
             slot_list = "\n".join(
-                [f"  ✅ {s.strftime('%H:%M')}〜{(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
+                [f"{s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
             )
 
             await self.reply_text(
                 reply_token,
-                f"📅 {date_str}（{wd}）{STORE_NAMES[store]}の空き状況：\n\n{slot_list}\n\n希望の時間を選んでください👇",
+                f"{date_str} ({wd}) @ {store_name}\n\n{slot_list}\n\n時間を選択してください:",
                 quick_reply=QuickReply(items=items),
             )
 
         elif state == "select_time":
-            # Parse time
             m = re.match(r"(\d{1,2}):(\d{2})", text)
             if not m:
                 await self.reply_text(
                     reply_token,
-                    "🕐 時間の形式がわかりませんでした。\n「10:00」のように入力してください。",
+                    "時間の形式が正しくありません。\n例: 10:00",
                 )
                 return
 
@@ -527,13 +581,13 @@ class LINEService:
             minute = int(m.group(2))
             date_str = data.get("date")
             store = data.get("store", "ebisu")
+            room_pref = data.get("room_pref")
 
             target_date = datetime.strptime(date_str, "%Y-%m-%d")
             slot_time = JST.localize(
                 target_date.replace(hour=hour, minute=minute, second=0)
             )
 
-            # Verify availability one more time
             bookings = await self._get_bookings()
             result = check_availability(slot_time, store, bookings)
 
@@ -541,25 +595,72 @@ class LINEService:
                 self._invalidate_cache()
                 await self.reply_text(
                     reply_token,
-                    f"😔 申し訳ありません、{slot_time.strftime('%H:%M')}はもう埋まってしまいました。\n\n別の時間を選んでください。",
+                    f"{slot_time.strftime('%H:%M')} は埋まってしまいました。\n別の時間を選択してください。",
                 )
                 return
 
+            # Room Preference Logic
+            selected_room = None
+            rooms_avail = result.get("rooms_available", [])
+            
+            if store == "ebisu":
+                if room_pref:
+                    if room_pref in rooms_avail:
+                        selected_room = room_pref
+                    else:
+                        # Conflict
+                        avail_rooms = [r for r in rooms_avail]
+                        avail_str = ", ".join([f"Room {r}" for r in avail_rooms])
+                        target_room_label = f"Room {room_pref}"
+                        
+                        data["pending_time"] = f"{hour:02d}:{minute:02d}"
+                        await db.set_session(
+                            user_id, "booking", "resolve_room_conflict", json.dumps(data)
+                        )
+                        
+                        # Minimal conflict msg
+                        await self.reply_text(
+                            reply_token,
+                            f"個室{target_room_label} は埋まっています。\n"
+                            f"個室{avail_str} なら空いています。",
+                            quick_reply=QuickReply(
+                                items=[
+                                    QuickReplyItem(
+                                        action=MessageAction(label=f"Use {avail_rooms[0]}", text=f"個室{avail_rooms[0]}で予約")
+                                    ),
+                                    QuickReplyItem(
+                                        action=MessageAction(label="Change Time", text="時間を変更する")
+                                    )
+                                ]
+                            )
+                        )
+                        return
+                
+                if not selected_room and rooms_avail:
+                    selected_room = rooms_avail[0]
+
             data["time"] = f"{hour:02d}:{minute:02d}"
+            if selected_room:
+                 data["room"] = selected_room
+
             await db.set_session(
                 user_id, "booking", "confirm", json.dumps(data)
             )
 
-            display_date = slot_time.strftime("%m月%d日")
-            wd = WEEKDAY_JP[slot_time.weekday()]
-            time_range = f"{hour:02d}:{minute:02d}〜{hour + 1:02d}:{minute:02d}"
+            # Confirmation Message (Minimal)
+            display_date = slot_time.strftime("%m.%d")
+            wd = WEEKDAY_EN[slot_time.weekday()]
+            time_range = f"{hour:02d}:{minute:02d} - {hour + 1:02d}:{minute:02d}"
+            store_display = STORE_NAMES.get(store, store)
+            if selected_room:
+                store_display += f" [Room {selected_room}]"
 
             confirm_msg = (
-                f"📋 予約内容の確認\n\n"
-                f"📅 {display_date}（{wd}）\n"
-                f"🕐 {time_range}\n"
-                f"📍 {STORE_NAMES[store]}\n\n"
-                f"この内容でよろしいですか？"
+                f"[ 予約確認 ]\n\n"
+                f"{display_date} ({wd})\n"
+                f"{time_range}\n"
+                f"{store_display}\n\n"
+                f"よろしいですか？"
             )
 
             await self.reply_text(
@@ -568,29 +669,116 @@ class LINEService:
                 quick_reply=QuickReply(
                     items=[
                         QuickReplyItem(
-                            action=MessageAction(label="✅ 確定する", text="確定する")
+                            action=MessageAction(label="Yes", text="確定する")
                         ),
                         QuickReplyItem(
-                            action=MessageAction(label="🔄 変更する", text="変更する")
+                            action=MessageAction(label="Change", text="変更する")
                         ),
                         QuickReplyItem(
-                            action=MessageAction(label="❌ キャンセル", text="キャンセル")
+                            action=MessageAction(label="Cancel", text="キャンセル")
                         ),
                     ]
                 ),
             )
 
+        elif state == "resolve_room_conflict":
+            if "変更する" in text:
+                target_date = datetime.strptime(data["date"], "%Y-%m-%d")
+                bookings = await self._get_bookings()
+                slots = get_available_slots(target_date, data["store"], bookings)
+
+                items = []
+                for slot in slots[:13]:
+                    time_str = slot.strftime("%H:%M")
+                    items.append(
+                        QuickReplyItem(action=MessageAction(label=f"{time_str}", text=time_str))
+                    )
+                
+                await db.set_session(user_id, "booking", "select_time", json.dumps(data))
+                await self.reply_text(
+                    reply_token, 
+                    "Select Time:",
+                    quick_reply=QuickReply(items=items)
+                )
+                return
+
+            elif "で予約" in text:
+                pending_time_str = data.get("pending_time")
+                data["time"] = pending_time_str
+                
+                # Extract room "個室A" -> "A"
+                room_match = re.search(r"個室([AB])", text)
+                selected_room = room_match.group(1) if room_match else None
+                if selected_room:
+                    data["room"] = selected_room
+                
+                await db.set_session(user_id, "booking", "confirm", json.dumps(data))
+                
+                # Show confirmation
+                h, m = map(int, pending_time_str.split(":"))
+                target_date = datetime.strptime(data["date"], "%Y-%m-%d")
+                slot_time = JST.localize(target_date.replace(hour=h, minute=m, second=0))
+                
+                display_date = slot_time.strftime("%m.%d")
+                wd = WEEKDAY_EN[slot_time.weekday()]
+                time_range = f"{h:02d}:{m:02d} - {h + 1:02d}:{m:02d}"
+                
+                store_display = STORE_NAMES.get(data["store"], data["store"])
+                if selected_room:
+                    store_display += f" [Room {selected_room}]"
+
+                confirm_msg = (
+                    f"[ 予約確認 ]\n\n"
+                    f"{display_date} ({wd})\n"
+                    f"{time_range}\n"
+                    f"{store_display}\n\n"
+                    f"よろしいですか？"
+                )
+                
+                await self.reply_text(
+                    reply_token,
+                    confirm_msg,
+                    quick_reply=QuickReply(
+                        items=[
+                            QuickReplyItem(
+                                action=MessageAction(label="Yes", text="確定する")
+                            ),
+                            QuickReplyItem(
+                                action=MessageAction(label="Cancel", text="キャンセル")
+                            ),
+                        ]
+                    ),
+                )
+
         elif state == "confirm":
             if "確定" in text or "はい" in text or "OK" in text.upper():
+                mode = data.get("mode", "booking")
+                target_id = data.get("target_booking_id")
+                target_type = data.get("target_booking_type")
+
                 store = data.get("store", "ebisu")
                 date_str = data.get("date")
                 time_str = data.get("time")
-
-                slot_datetime = f"{date_str}T{time_str}:00+09:00"
+                
+                # Format datetime
+                if len(time_str) == 5:
+                    slot_datetime = f"{date_str}T{time_str}:00+09:00"
+                else:
+                    slot_datetime = f"{date_str}T{time_str}+09:00"
 
                 # Save booking as provisional (仮予約)
+                metadata = {"room": data.get("room")} if data.get("room") else None
+                
+                # 1. Cancel old booking if in change mode
+                if mode == "change" and target_type == "db" and target_id:
+                    try:
+                        await db.cancel_booking(target_id)
+                    except Exception as e:
+                        print(f"Failed to cancel old booking: {e}")
+
+                # 2. Save new booking
                 booking_id = await db.save_booking(
-                    user_id, store, slot_datetime, "provisional"
+                    user_id, store, slot_datetime, "provisional", metadata
                 )
 
                 # Clear session
@@ -599,37 +787,79 @@ class LINEService:
 
                 # Parse for display
                 dt = datetime.fromisoformat(slot_datetime)
-                display_date = dt.strftime("%m月%d日")
-                wd = WEEKDAY_JP[dt.weekday()]
+                display_date = dt.strftime("%m.%d")
+                wd = WEEKDAY_EN[dt.weekday()]
                 hour = dt.hour
-                time_range = f"{hour:02d}:00〜{hour + 1:02d}:00"
+                time_range = f"{hour:02d}:00 - {hour + 1:02d}:00"
+                
+                # Check for room selection
+                selected_room = data.get("room")
+                store_display = STORE_NAMES.get(store, store)
+                if selected_room:
+                    store_display += f" [Room {selected_room}]"
 
-                success_msg = (
-                    f"📩 仮予約を受け付けました！\n\n"
-                    f"📅 {display_date}（{wd}）\n"
-                    f"🕐 {time_range}\n"
-                    f"📍 {STORE_NAMES[store]}\n"
-                    f"🎫 受付No. {booking_id}\n\n"
-                    f"⚠️ まだ予約は確定ではありません。\n\n"
-                    f"管理者がhacomonoの空き状況を確認し、"
-                    f"正式に予約を確定してからご連絡いたします。\n"
-                    f"今しばらくお待ちください🙇‍♂️"
-                )
+                # 3. Success Message
+                if mode == "change":
+                    success_msg = (
+                        f"Change Request Accepted.\n\n"
+                        f"{display_date} ({wd})\n"
+                        f"{time_range}\n"
+                        f"{store_display}\n\n"
+                        f"Waiting for confirmation."
+                    )
+                else:
+                    success_msg = (
+                        f"Booking Requested.\n\n"
+                        f"{display_date} ({wd})\n"
+                        f"{time_range}\n"
+                        f"{store_display}\n\n"
+                        f"ID: {booking_id}\n\n"
+                        f"Waiting for confirmation."
+                    )
 
-                await self.reply_text(event_reply_token_unused := reply_token, success_msg)
+                await self.reply_text(reply_token, success_msg)
+                
+                # Notify Admin
+                # Ensure settings has ADMIN_USER_ID
+                admin_id = getattr(settings, "ADMIN_USER_ID", None)
+                if admin_id:
+                    user_name = user.get("display_name", "Guest")
+                    action_label = "Change Request" if mode == "change" else "New Booking"
+                    admin_msg = (
+                        f"[{action_label}]\n"
+                        f"Customer: {user_name}\n"
+                        f"Date: {display_date} ({wd})\n"
+                        f"Time: {time_range}\n"
+                        f"Store: {store_display}"
+                    )
+                    try:
+                         await self.push_text(admin_id, admin_msg)
+                    except Exception as e:
+                         print(f"Failed to push admin notification: {e}")
 
-                # Notify admin
+                # 4. Notify admin
                 if settings.ADMIN_USER_ID:
                     display_name = user.get("display_name", "Unknown")
-                    admin_msg = (
-                        f"📢 新規・仮予約申請\n"
-                        f"👤 {display_name}\n"
-                        f"📅 {display_date}（{wd}）{time_range}\n"
-                        f"📍 {STORE_NAMES[store]}\n"
-                        f"🎫 No. {booking_id}\n\n"
-                        f"⚠️ hacomonoで予約枠を確保し、\n"
-                        f"ユーザーへ確定連絡をしてください！"
-                    )
+                    
+                    if mode == "change":
+                        admin_msg = (
+                            f"🔄 予約変更依頼 (旧ID:{target_id} -> 新ID:{booking_id})\n"
+                            f"👤 {display_name}\n"
+                            f"📍 {store_display}\n"
+                            f"📅 {date_str} {time_range}\n"
+                            f"⚠️ カレンダーを確認して更新してください！"
+                        )
+                    else:
+                        admin_msg = (
+                            f"🔔 新規予約リクエスト\n"
+                            f"👤 {display_name}\n"
+                            f"📅 {date_str}\n"
+                            f"🕐 {time_range}\n"
+                            f"📍 {store_display}\n"
+                            f"🎫 No. {booking_id}\n\n"
+                            f"⚠️ hacomono/カレンダーに登録してください！"
+                        )
+                        
                     try:
                         await self.push_text(settings.ADMIN_USER_ID, admin_msg)
                     except Exception as e:
@@ -704,7 +934,14 @@ class LINEService:
             date_s = dt.strftime("%m/%d")
             wd = WEEKDAY_JP[dt.weekday()]
             time_s = dt.strftime("%H:%M")
+            
+            # Metadata parsing
+            metadata = b.get("metadata", {})
+            room = metadata.get("room") if metadata else None
             store_name = STORE_NAMES.get(b["store"], b["store"])
+            if room:
+                store_name += f" [個室{room}]"
+                
             status_text = "仮予約" if b.get("status") == "provisional" else "予約中"
             status_color = "#ff9f1c" if b.get("status") == "provisional" else "#2ec4b6"
             
@@ -801,6 +1038,8 @@ class LINEService:
             wd = WEEKDAY_JP[dt.weekday()]
             time_s = dt.strftime("%H:%M")
             store_name = STORE_NAMES.get(b.store, "")
+            if b.room:
+                store_name += f" [個室{b.room}]"
             
             bubbles.append({
                 "type": "bubble",
@@ -1070,14 +1309,267 @@ class LINEService:
 
         await self.reply_text(
             reply_token,
-            "TOPFORM予約Botです！💪\n\n以下からお選びください👇\n\n"
-            "📅 予約する → 新しい予約\n"
-            "📖 予約確認 → あなたの予約一覧\n"
-            "📋 早見表 → Web版スケジュール\n\n"
-            "💡 日にちを送ると空き状況も確認できます\n"
-            "例：「2/20空いてる？」「明日空き」",
+            "【 TOPFORM BOT 】\n\n"
+            "以下のメニューからお選びください。\n\n"
+            "■ 予約する\n"
+            "■ 予約確認\n"
+            "■ 早見表\n\n"
+            "※ 日時を入力すると空き状況も確認できます。\n"
+            "(例:「2.20空いてる？」「明日空き」)",
             quick_reply=quick_reply,
         )
+
+
+    # ============================================================
+    # Show user bookings (Simple Text)
+    # ============================================================
+    async def _show_user_bookings_simple(
+        self, reply_token: str, user_id: str, user: dict
+    ):
+        """Show the user's upcoming bookings in a simple text list."""
+        # Get from local DB (Provisional/Confirmed)
+        upcoming = await db.get_user_bookings(user_id, include_past=False)
+        
+        # Calendar bookings (Legacy/Manual)
+        display_name = user.get("display_name", "")
+        cal_bookings = []
+        if display_name and display_name != "Unknown":
+            bookings = await self._get_bookings()
+            cal_bookings = find_user_bookings(display_name, bookings)
+            # Filter future only
+            now = datetime.now(JST)
+            cal_bookings = [b for b in cal_bookings if b.start_dt > now]
+
+        if not upcoming and not cal_bookings:
+            await self.reply_text(
+                reply_token,
+                "📖 現在の予約はありません。\n\n「予約する」で新しい予約を入れましょう！📅",
+            )
+            return
+
+        # Build text list
+        msg_lines = ["Booking List\n"]
+        
+        # Merge and sort all bookings
+        all_display_bookings = []
+        
+        # 1. DB Bookings
+        for b in upcoming:
+            dt = datetime.fromisoformat(b["slot_datetime"])
+            metadata = b.get("metadata", {})
+            room = metadata.get("room") if metadata else None
+            store_name = STORE_NAMES.get(b["store"], b["store"])
+            if room:
+                store_name += f" [Room {room}]"
+            
+            status_mark = " (Prov)" if b.get("status") == "provisional" else ""
+            all_display_bookings.append({
+                "dt": dt,
+                "text": f"{dt.strftime('%m.%d')} ({WEEKDAY_EN[dt.weekday()]}) {dt.strftime('%H:%M')} | {store_name}{status_mark}"
+            })
+
+        # 2. Calendar Bookings
+        for b in cal_bookings:
+            dt = b.start_dt
+            store_name = STORE_NAMES.get(b.store, "")
+            if b.room:
+                store_name += f" [Room {b.room}]"
+            
+            all_display_bookings.append({
+                "dt": dt,
+                "text": f"{dt.strftime('%m.%d')} ({WEEKDAY_EN[dt.weekday()]}) {dt.strftime('%H:%M')} | {store_name}"
+            })
+
+        # Sort by date
+        all_display_bookings.sort(key=lambda x: x["dt"])
+
+        # Limit to prevent message too long
+        display_limit = 15
+        for item in all_display_bookings[:display_limit]:
+            msg_lines.append(item["text"])
+        
+        if len(all_display_bookings) > display_limit:
+            msg_lines.append(f"\n...and {len(all_display_bookings) - display_limit} more")
+
+        msg_lines.append("\nType 'change' to modify.")
+
+        await self.reply_text(reply_token, "\n".join(msg_lines))
+
+    # ============================================================
+    # Show booking list for modification (Carousel with Pagination)
+    # ============================================================
+    async def _show_booking_change_list(
+        self, reply_token: str, user_id: str, user: dict, offset: int = 0
+    ):
+        """Show future bookings in a carousel to select which one to change."""
+        
+        # 1. Fetch ALL future bookings (DB + Calendar)
+        upcoming = await db.get_user_bookings(user_id, include_past=False)
+        
+        display_name = user.get("display_name", "")
+        cal_bookings = []
+        if display_name and display_name != "Unknown":
+            bookings = await self._get_bookings()
+            cal_bookings = find_user_bookings(display_name, bookings)
+            # Filter future only
+            now = datetime.now(JST)
+            cal_bookings = [b for b in cal_bookings if b.start_dt > now]
+
+        # 2. Unify format
+        all_bookings = []
+        
+        # DB
+        for b in upcoming:
+            dt = datetime.fromisoformat(b["slot_datetime"])
+            metadata = b.get("metadata", {})
+            room = metadata.get("room") if metadata else None
+            store_name = STORE_NAMES.get(b["store"], b["store"])
+            if room:
+                store_name += f" [Room {room}]"
+            
+            all_bookings.append({
+                "type": "db",
+                "id": b["id"],
+                "dt": dt,
+                "store": store_name,
+                "status": b.get("status")
+            })
+            
+        # Calendar
+        for b in cal_bookings:
+            dt = b.start_dt
+            store_name = STORE_NAMES.get(b.store, "")
+            if b.room:
+                store_name += f" [Room {b.room}]"
+                
+            all_bookings.append({
+                "type": "cal",
+                "id": b.id or "cal", # Calendar events might not have numeric ID
+                "dt": dt,
+                "store": store_name,
+                "status": "confirmed"
+            })
+            
+        # Sort
+        all_bookings.sort(key=lambda x: x["dt"])
+        
+        if not all_bookings:
+             await self.reply_text(reply_token, "変更可能な予約はありません。")
+             return
+
+        # 3. Pagination Logic
+        # Max bubbles = 12 (Official Line limit)
+        # If we have more items than fit in one carousel, we use the last bubble for "More"
+        CAROUSEL_MAX = 12
+        
+        has_more = False
+        end_idx = offset + CAROUSEL_MAX
+        
+        if len(all_bookings) > end_idx:
+            # Need "More" button, so effectively use MAX-1 bubbles for content
+            end_idx = offset + (CAROUSEL_MAX - 1)
+            has_more = True
+            
+        current_batch = all_bookings[offset : end_idx]
+        
+        # 4. Build Bubbles
+        bubbles = []
+        for b in current_batch:
+            date_s = b["dt"].strftime("%m.%d")
+            wd = WEEKDAY_EN[b["dt"].weekday()]
+            time_s = b["dt"].strftime("%H:%M")
+            
+            bubble = {
+                "type": "bubble",
+                "size": "kilo",
+                "header": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": f"{date_s} ({wd}) {time_s}",
+                            "weight": "bold",
+                            "color": "#000000",
+                            "size": "md"
+                        }
+                    ],
+                    "backgroundColor": "#ffffff",
+                    "paddingTop": "20px",
+                    "paddingStart": "20px",
+                    "paddingBottom": "0px"
+                },
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": f"{b['store']}",
+                            "size": "sm",
+                            "color": "#666666",
+                            "wrap": True
+                        }
+                    ],
+                    "paddingAll": "20px"
+                },
+                "footer": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "action": {
+                                "type": "postback",
+                                "label": "Change",
+                                "data": json.dumps({
+                                    "action": "select_change_booking",
+                                    "booking_id": b["id"],
+                                    "type": b["type"]
+                                })
+                            },
+                            "style": "secondary",
+                            "height": "sm"
+                        }
+                    ],
+                    "paddingAll": "10px"
+                }
+            }
+            bubbles.append(bubble)
+            
+        # 5. Add "More" Bubble if needed
+        if has_more:
+            bubbles.append({
+                "type": "bubble",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "action": {
+                                "type": "postback",
+                                "label": "More...",
+                                "data": json.dumps({
+                                    "action": "change_list_more",
+                                    "offset": end_idx
+                                })
+                            },
+                            "style": "link",
+                            "height": "sm"
+                        }
+                    ],
+                    "justifyContent": "center",
+                    "height": "150px"
+                }
+            })
+            
+        carousel = {
+            "type": "carousel",
+            "contents": bubbles
+        }
+        
+        await self.reply_flex(reply_token, "予約変更：予約を選択", carousel)
 
 
 # Singleton instance

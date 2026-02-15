@@ -62,6 +62,13 @@ class Database:
                 )
             """)
 
+            # Check if metadata column exists in bookings
+            cursor = await db.execute("PRAGMA table_info(bookings)")
+            columns = [col[1] for col in await cursor.fetchall()]
+            if "metadata" not in columns:
+                await db.execute("ALTER TABLE bookings ADD COLUMN metadata TEXT")
+                print("✅ Added metadata column to bookings table")
+
             await db.commit()
             print("✅ Database initialized")
 
@@ -100,19 +107,28 @@ class Database:
                 return dict(row)
 
     async def save_booking(
-        self, line_user_id: str, store: str, slot_datetime: str, status: str = "confirmed"
+        self,
+        line_user_id: str,
+        store: str,
+        slot_datetime: str,
+        status: str = "confirmed",
+        metadata: Optional[dict] = None,
     ) -> int:
         """Save a booking record."""
+        import json
+        metadata_json = json.dumps(metadata) if metadata else None
+
         async with aiosqlite.connect(self._db_path) as db:
             cursor = await db.execute(
-                """INSERT INTO bookings (line_user_id, store, slot_datetime, status, confirmed_at)
-                   VALUES (?, ?, ?, ?, ?)""",
+                """INSERT INTO bookings (line_user_id, store, slot_datetime, status, confirmed_at, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
                 (
                     line_user_id,
                     store,
                     slot_datetime,
                     status,
                     datetime.now(JST).isoformat() if status == "confirmed" else None,
+                    metadata_json,
                 ),
             )
             await db.commit()
@@ -122,6 +138,7 @@ class Database:
         self, line_user_id: str, include_past: bool = False
     ) -> list[dict]:
         """Get bookings for a specific user."""
+        import json
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             now = datetime.now(JST).isoformat()
@@ -142,6 +159,19 @@ class Database:
                 )
 
             rows = await cursor.fetchall()
+            results = []
+            for row in rows:
+                d = dict(row)
+                # Parse metadata JSON
+                if "metadata" in d.keys() and d["metadata"]:
+                    try:
+                        d["metadata"] = json.loads(d["metadata"])
+                    except:
+                        d["metadata"] = {}
+                else:
+                    d["metadata"] = {}
+                results.append(d)
+            return results
             return [dict(row) for row in rows]
 
     async def cancel_booking(self, booking_id: int, line_user_id: str) -> bool:
