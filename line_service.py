@@ -272,7 +272,8 @@ class LINEService:
             await self._show_hayamihyo_link(reply_token)
             return
 
-        if "予約変更" in text or "変更" in text:
+        if "予約変更" in text:
+            await db.clear_session(user_id)  # Clear any active session first
             await self._show_booking_change_list(reply_token, user_id, user)
             return
 
@@ -667,13 +668,10 @@ class LINEService:
                 quick_reply=QuickReply(
                     items=[
                         QuickReplyItem(
-                            action=MessageAction(label="✅ 確定", text="確定する")
+                            action=MessageAction(label="✅ 予約する", text="確定する")
                         ),
                         QuickReplyItem(
-                            action=MessageAction(label="🔄 変更", text="変更する")
-                        ),
-                        QuickReplyItem(
-                            action=MessageAction(label="❌ キャンセル", text="キャンセル")
+                            action=MessageAction(label="❌ やめる", text="キャンセル")
                         ),
                     ]
                 ),
@@ -848,16 +846,6 @@ class LINEService:
                     except Exception as e:
                         print(f"Admin notification failed: {e}")
 
-            elif "変更" in text:
-                data.pop("time", None)
-                await db.set_session(
-                    user_id, "booking", "select_date", json.dumps(data)
-                )
-                await self.reply_text(
-                    reply_token,
-                    "🔄 変更しますね。\n\n希望の日にちを教えてください📅\n例：「2/20」「明日」「来週水曜」",
-                )
-
             elif "キャンセル" in text or "やめ" in text:
                 await db.clear_session(user_id)
                 await self.reply_text(reply_token, "予約をキャンセルしました。\nまたいつでもどうぞ！👋")
@@ -865,17 +853,14 @@ class LINEService:
             else:
                 await self.reply_text(
                     reply_token,
-                    "「確定する」「変更する」「キャンセル」から選んでください👇",
+                    "「予約する」または「やめる」を選んでください👇",
                     quick_reply=QuickReply(
                         items=[
                             QuickReplyItem(
-                                action=MessageAction(label="✅ 確定する", text="確定する")
+                                action=MessageAction(label="✅ 予約する", text="確定する")
                             ),
                             QuickReplyItem(
-                                action=MessageAction(label="🔄 変更する", text="変更する")
-                            ),
-                            QuickReplyItem(
-                                action=MessageAction(label="❌ キャンセル", text="キャンセル")
+                                action=MessageAction(label="❌ やめる", text="キャンセル")
                             ),
                         ]
                     ),

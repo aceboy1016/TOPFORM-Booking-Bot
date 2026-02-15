@@ -1,9 +1,10 @@
 """
 Setup Rich Menu for TopForm LINE Bot
-Uses layout:
-- Top (Full width): Schedule & Menu (Action: "早見表")
-- Bottom Left (Half width): Booking (Action: "予約する")
-- Bottom Right (Half width): My Page (Action: "予約確認")
+Uses 2x2 layout:
+- Top Left: Schedule (Action: "早見表")
+- Top Right: Change Booking (Action: "予約変更")
+- Bottom Left: Booking (Action: "予約する")
+- Bottom Right: My Page (Action: "予約確認")
 """
 import os
 import sys
@@ -49,20 +50,25 @@ def setup_rich_menu(image_path):
         rich_menu_req = RichMenuRequest(
             size=RichMenuSize(width=2500, height=1686),
             selected=True,
-            name="TopForm Menu v1",
+            name="TopForm Menu v2",
             chat_bar_text="MENU",
             areas=[
-                # 1. Schedule (Top)
+                # 1. Schedule (Top Left)
                 RichMenuArea(
-                    bounds=RichMenuBounds(x=0, y=0, width=2500, height=843),
+                    bounds=RichMenuBounds(x=0, y=0, width=1250, height=843),
                     action=MessageAction(label="早見表", text="早見表")
                 ),
-                # 2. Booking (Bottom Left)
+                # 2. Change Booking (Top Right)
+                RichMenuArea(
+                    bounds=RichMenuBounds(x=1250, y=0, width=1250, height=843),
+                    action=MessageAction(label="予約変更", text="予約変更")
+                ),
+                # 3. Booking (Bottom Left)
                 RichMenuArea(
                     bounds=RichMenuBounds(x=0, y=843, width=1250, height=843),
                     action=MessageAction(label="予約する", text="予約する")
                 ),
-                # 3. Confirmation (Bottom Right)
+                # 4. Confirmation (Bottom Right)
                 RichMenuArea(
                     bounds=RichMenuBounds(x=1250, y=843, width=1250, height=843),
                     action=MessageAction(label="予約確認", text="予約確認")
@@ -77,21 +83,32 @@ def setup_rich_menu(image_path):
             ).rich_menu_id
             print(f"Created Rich Menu ID: {rich_menu_id}")
 
-            # Upload Image
+            # Upload Image (Using requests to avoid SDK serialization issues)
+            import requests
             print("Uploading image...")
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
-                
             # Content type detection (simple)
             content_type = "image/jpeg"
             if image_path.lower().endswith(".png"):
                 content_type = "image/png"
-                
-            messaging_api_blob.set_rich_menu_image(
-                rich_menu_id=rich_menu_id,
-                body=image_bytes,
-                _content_type=content_type
+            
+            headers = {
+                "Authorization": f"Bearer {configuration.access_token}",
+                "Content-Type": content_type
+            }
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            
+            resp = requests.post(
+                f"https://api-data.line.me/v2/bot/richmenu/{rich_menu_id}/content",
+                headers=headers,
+                data=image_data
             )
+            
+            if resp.status_code != 200:
+                print(f"Failed to upload image: {resp.text}")
+                return
+            
+            print("Image uploaded successfully.")
             print("Image uploaded successfully.")
 
             # Set as default
