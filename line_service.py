@@ -206,12 +206,19 @@ class LINEService:
             b_type = data.get("type")
             
             # Start booking flow in "change" mode
+            original_dt = data.get("dt")
+            original_store = data.get("store")
+            
             session_data = {
                 "mode": "change",
                 "target_booking_id": booking_id,
                 "target_booking_type": b_type,
                 # Carry over user preferences
-                "room_pref": user.get("room_pref")
+                "room_pref": user.get("room_pref"),
+                "original_booking_info": {
+                    "dt": original_dt,
+                    "store": original_store
+                }
             }
             
             await db.set_session(user_id, "booking", "select_store", json.dumps(session_data))
@@ -822,6 +829,36 @@ class LINEService:
                     display_name = user.get("display_name", "Unknown")
                     
                     if mode == "change":
+                        original_info = session.get("original_booking_info", {})
+                        orig_dt_str = original_info.get("dt", "")
+                        orig_store = original_info.get("store", "")
+                        
+                        orig_text = ""
+                        if orig_dt_str:
+                            try:
+                                odt = datetime.fromisoformat(orig_dt_str)
+                                owd = WEEKDAY_JP[odt.weekday()]
+                                orig_text = (
+                                    f"🔻 変更前\n"
+                                    f"📅 {odt.strftime('%m/%d')}（{owd}） {odt.strftime('%H:%M')}\n"
+                                    f"📍 {orig_store}\n"
+                                    f"⬇️\n\n"
+                                    f"✅ 変更後"
+                                )
+                            except:
+                                pass
+
+                        admin_msg = (
+                            f"🔄 予約変更リクエスト\n"
+                            f"👤 {display_name}\n\n"
+                            f"{orig_text}\n"
+                            f"📅 {display_date}（{wd}）\n"
+                            f"🕐 {time_range}\n"
+                            f"📍 {store_display}\n\n"
+                            f"⚠️ カレンダーを確認して更新してください！"
+                        )
+                    elif mode == "change_OLD_UNUSED":
+
                         admin_msg = (
                             f"🔄 予約変更リクエスト\n"
                             f"👤 {display_name}\n"
@@ -1493,7 +1530,9 @@ class LINEService:
                                 "data": json.dumps({
                                     "action": "select_change_booking",
                                     "booking_id": b["id"],
-                                    "type": b["type"]
+                                    "type": b["type"],
+                                    "dt": b["dt"].isoformat(),
+                                    "store": b["store"]
                                 })
                             },
                             "style": "secondary",
