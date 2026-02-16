@@ -470,13 +470,29 @@ class LINEService:
         if not target_dates:
             await self.reply_text(
                 reply_token,
-                "日時が正しくありません。\nもう一度入力してください\n(例: 2.20, 明日, 土曜)",
+                "日時が正しくありません。
+もう一度入力してください
+(例: 2.20, 明日, 土曜)",
             )
             return
 
         store = data.get("store", "ebisu")
         bookings = await self._get_bookings()
         
+        # --- Suggestion Logic ---
+        # If multiple dates found, save them as suggestions
+        if len(target_dates) > 1:
+            data["suggested_dates"] = [d.strftime("%Y-%m-%d") for d in target_dates]
+        
+        # If single date found, remove it from suggestions if exists
+        if len(target_dates) == 1:
+            td_str = target_dates[0].strftime("%Y-%m-%d")
+            sug = data.get("suggested_dates", [])
+            if td_str in sug:
+                sug.remove(td_str)
+                data["suggested_dates"] = sug
+        # ------------------------
+
         # If single date found, proceed to select_time
         if len(target_dates) == 1:
             target_date = target_dates[0]
@@ -489,7 +505,9 @@ class LINEService:
             if not slots:
                 await self.reply_text(
                     reply_token,
-                    f"😔 {date_str}（{wd}）は{store_name}の空きがありません。\n\n別の日時を入力してください📅",
+                    f"😔 {date_str}（{wd}）は{store_name}の空きがありません。
+
+別の日時を入力してください📅",
                 )
                 return
 
@@ -508,13 +526,19 @@ class LINEService:
                     )
                 )
 
-            slot_list = "\n".join(
+            slot_list = "
+".join(
                 [f"🕐 {s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
             )
 
             await self.reply_text(
                 reply_token,
-                f"📅 {date_str}（{wd}） {store_name}\n\n{slot_list}\n\nこちらはいかがでしょうか？\n時間を選択してください👇",
+                f"📅 {date_str}（{wd}） {store_name}
+
+{slot_list}
+
+こちらはいかがでしょうか？
+時間を選択してください👇",
                 quick_reply=QuickReply(items=items),
             )
             return
@@ -530,19 +554,27 @@ class LINEService:
             
             if slots:
                 slot_strs = [s.strftime("%H:%M") for s in slots]
-                if len(slot_strs) > 8:
-                    slot_strs = slot_strs[:8] + ["..."]
-                msg_lines.append(f"📅 {d_str}（{wd}）\n" + "  " + ", ".join(slot_strs))
+                if len(slot_strs) > 6:
+                    slot_strs = slot_strs[:6] + ["..."]
+                msg_lines.append(f"📅 {d_str}（{wd}）
+" + "  " + ", ".join(slot_strs))
             else:
                 msg_lines.append(f"📅 {d_str}（{wd}）: 満席 🈵")
         
-        final_msg = "\n\n".join(msg_lines)
+        final_msg = "
+
+".join(msg_lines)
         if len(final_msg) > 1000:
-            final_msg = final_msg[:1000] + "\n..."
+            final_msg = final_msg[:1000] + "
+..."
             
         await self.reply_text(
              reply_token,
-             f"■ {store_name} の空き状況\n\n{final_msg}\n\nご希望の日時（1日）を指定してください！"
+             f"■ {store_name} の空き状況
+
+{final_msg}
+
+ご希望の日時（1日）を指定してください！"
         )
         # Ensure session is in select_date
         await db.set_session(user_id, "booking", "select_date", json.dumps(data))
@@ -939,7 +971,41 @@ class LINEService:
                         f"スタッフが確認後、確定のご連絡をいたします📩"
                     )
 
-                await self.reply_text(reply_token, success_msg)
+                # Check for suggested dates to prompt next booking
+                quick_reply = None
+                suggested_dates = data.get("suggested_dates", [])
+                if suggested_dates:
+                    current_date = data.get("date")
+                    valid_suggestions = []
+                    seen = set()
+                    for d in suggested_dates:
+                        if d != current_date and d not in seen:
+                            valid_suggestions.append(d)
+                            seen.add(d)
+                    
+                    if valid_suggestions:
+                        success_msg += "
+
+━━━━━━━━━━━━━━━
+
+💡 続けて他の日程も予約しますか？
+（候補日をタップですぐ確認できます）"
+                        items = []
+                        for sd_str in valid_suggestions[:10]:
+                            try:
+                                dt = datetime.strptime(sd_str, "%Y-%m-%d")
+                                label = dt.strftime("%-m/%-d")
+                                items.append(
+                                    QuickReplyItem(
+                                        action=MessageAction(label=label, text=label)
+                                    )
+                                )
+                            except:
+                                pass
+                        if items:
+                            quick_reply = QuickReply(items=items)
+
+                await self.reply_text(reply_token, success_msg, quick_reply=quick_reply)
                 
                 # Notify Admin (single notification)
                 if settings.ADMIN_USER_ID:
