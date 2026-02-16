@@ -1013,7 +1013,8 @@ class LINEService:
                     slot_datetime = f"{date_str}T{time_str}+09:00"
 
                 # Save booking as provisional (仮予約)
-                metadata = {"room": data.get("room")} if data.get("room") else None
+                room_info = data.get("room") or data.get("room_pref")
+                metadata = {"room": room_info} if room_info else None
                 
                 # 1. Cancel old booking if in change mode
                 if mode == "change" and target_type == "db" and target_id:
@@ -1040,7 +1041,7 @@ class LINEService:
                 time_range = f"{hour:02d}:{minute:02d} - {hour + 1:02d}:{minute:02d}"
                 
                 # Check for room selection
-                selected_room = data.get("room")
+                selected_room = data.get("room") or data.get("room_pref")
                 store_display = STORE_NAMES.get(store, store)
                 if selected_room:
                     store_display += f"（個室{selected_room}）"
