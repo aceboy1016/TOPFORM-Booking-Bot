@@ -355,6 +355,169 @@ class LINEService:
     # ============================================================
     # Date query parsing
     # ============================================================
+    def _parse_multiple_dates(self, text: str) -> list[datetime]:
+        """
+        Parse natural language text for multiple dates.
+        Examples:
+          「2/20, 2/21空いてる？」「2日と23日」
+        """
+        found_dates = []
+        now = datetime.now(JST)
+
+        # 1. Keywords
+        if "今日" in text:
+            found_dates.append(now)
+        if "明日" in text:
+            found_dates.append(now + timedelta(days=1))
+        if "明後日" in text or "あさって" in text:
+            found_dates.append(now + timedelta(days=2))
+
+        # 2. Weekdays
+        weekday_map = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
+        
+        # "来週X曜"
+        for m in re.finditer(r"来週\s*([月火水木金土日])", text):
+            target_wd = weekday_map[m.group(1)]
+            days_ahead = (7 - now.weekday() + target_wd) % 7
+            if days_ahead == 0: days_ahead = 7
+            days_ahead += 7
+            # Adjust to ensure it's next week
+            current_wd = now.weekday()
+            days_ahead = (target_wd - current_wd) % 7 + 7
+            found_dates.append(now + timedelta(days=days_ahead))
+
+        # "[今週]X曜" - Remove "来週" matches first to avoid overlap
+        text_no_next = re.sub(r"来週\s*[月火水木金土日]", "", text)
+        for m in re.finditer(r"(?:今週\s*)?([月火水木金土日])曜", text_no_next):
+            target_wd = weekday_map[m.group(1)]
+            days_ahead = (target_wd - now.weekday()) % 7
+            if days_ahead == 0: days_ahead = 7
+            found_dates.append(now + timedelta(days=days_ahead))
+
+        # 3. M/D pattern (e.g. 2/20, 2月20日)
+        for m in re.finditer(r"(\d{1,2})[/月](\d{1,2})", text):
+            month = int(m.group(1))
+            day = int(m.group(2))
+            year = now.year
+            try:
+                target = JST.localize(datetime(year, month, day))
+                if target.date() < now.date():
+                    target = target.replace(year=year + 1)
+                found_dates.append(target)
+            except ValueError:
+                pass
+
+        # 4. D日 pattern (e.g. 20日) - Avoid matching parts of M/D
+        # Replace M/D matches with placeholders in temp string
+        text_temp = re.sub(r"\d{1,2}[/月]\d{1,2}", "", text)
+        for m in re.finditer(r"(\d{1,2})日", text_temp):
+            day = int(m.group(1))
+            year = now.year
+            month = now.month
+            try:
+                target = JST.localize(datetime(year, month, day))
+                # If date passed in this month, assume next month
+                if target.date() < now.date():
+                    month += 1
+                    if month > 12:
+                        month = 1
+                        year += 1
+                    target = JST.localize(datetime(year, month, day))
+                found_dates.append(target)
+            except ValueError:
+                pass
+        
+        # Sort and unique by date
+        unique_map = {}
+        for d in found_dates:
+            unique_map[d.date()] = d
+        
+        return sorted(list(unique_map.values()))
+
+    def _parse_date_query(self, text: str) -> Optional[datetime]:
+        """Wrapper for single date backward compatibility."""
+        dates = self._parse_multiple_dates(text)
+        return dates[0] if dates else None
+
+    def _parse_multiple_dates(self, text: str) -> list[datetime]:
+        """
+        Parse natural language text for multiple dates.
+        Examples:
+          「2/20, 2/21空いてる？」「2日と23日」
+        """
+        found_dates = []
+        now = datetime.now(JST)
+
+        # 1. Keywords
+        if "今日" in text:
+            found_dates.append(now)
+        if "明日" in text:
+            found_dates.append(now + timedelta(days=1))
+        if "明後日" in text or "あさって" in text:
+            found_dates.append(now + timedelta(days=2))
+
+        # 2. Weekdays
+        weekday_map = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
+        
+        # "来週X曜"
+        for m in re.finditer(r"来週\s*([月火水木金土日])", text):
+            target_wd = weekday_map[m.group(1)]
+            days_ahead = (7 - now.weekday() + target_wd) % 7
+            if days_ahead == 0: days_ahead = 7
+            days_ahead += 7
+            # Adjust to ensure it's next week
+            current_wd = now.weekday()
+            days_ahead = (target_wd - current_wd) % 7 + 7
+            found_dates.append(now + timedelta(days=days_ahead))
+
+        # "[今週]X曜" - Remove "来週" matches first to avoid overlap
+        text_no_next = re.sub(r"来週\s*[月火水木金土日]", "", text)
+        for m in re.finditer(r"(?:今週\s*)?([月火水木金土日])曜", text_no_next):
+            target_wd = weekday_map[m.group(1)]
+            days_ahead = (target_wd - now.weekday()) % 7
+            if days_ahead == 0: days_ahead = 7
+            found_dates.append(now + timedelta(days=days_ahead))
+
+        # 3. M/D pattern (e.g. 2/20, 2月20日)
+        for m in re.finditer(r"(\d{1,2})[/月](\d{1,2})", text):
+            month = int(m.group(1))
+            day = int(m.group(2))
+            year = now.year
+            try:
+                target = JST.localize(datetime(year, month, day))
+                if target.date() < now.date():
+                    target = target.replace(year=year + 1)
+                found_dates.append(target)
+            except ValueError:
+                pass
+
+        # 4. D日 pattern (e.g. 20日) - Avoid matching parts of M/D
+        # Replace M/D matches with placeholders in temp string
+        text_temp = re.sub(r"\d{1,2}[/月]\d{1,2}", "", text)
+        for m in re.finditer(r"(\d{1,2})日", text_temp):
+            day = int(m.group(1))
+            year = now.year
+            month = now.month
+            try:
+                target = JST.localize(datetime(year, month, day))
+                # If date passed in this month, assume next month
+                if target.date() < now.date():
+                    month += 1
+                    if month > 12:
+                        month = 1
+                        year += 1
+                    target = JST.localize(datetime(year, month, day))
+                found_dates.append(target)
+            except ValueError:
+                pass
+        
+        # Sort and unique by date
+        unique_map = {}
+        for d in found_dates:
+            unique_map[d.date()] = d
+        
+        return sorted(list(unique_map.values()))
+
     def _parse_date_query(self, text: str) -> Optional[datetime]:
         """
         Parse natural language date queries.
@@ -435,6 +598,169 @@ class LINEService:
             return None  # Will be handled differently
 
         return None
+
+    def _parse_multiple_dates(self, text: str) -> list[datetime]:
+        """
+        Parse natural language text for multiple dates.
+        Examples:
+          「2/20, 2/21空いてる？」「2日と23日」
+        """
+        found_dates = []
+        now = datetime.now(JST)
+
+        # 1. Keywords
+        if "今日" in text:
+            found_dates.append(now)
+        if "明日" in text:
+            found_dates.append(now + timedelta(days=1))
+        if "明後日" in text or "あさって" in text:
+            found_dates.append(now + timedelta(days=2))
+
+        # 2. Weekdays
+        weekday_map = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
+        
+        # "来週X曜"
+        for m in re.finditer(r"来週\s*([月火水木金土日])", text):
+            target_wd = weekday_map[m.group(1)]
+            days_ahead = (7 - now.weekday() + target_wd) % 7
+            if days_ahead == 0: days_ahead = 7
+            days_ahead += 7
+            # Adjust to ensure it's next week
+            current_wd = now.weekday()
+            days_ahead = (target_wd - current_wd) % 7 + 7
+            found_dates.append(now + timedelta(days=days_ahead))
+
+        # "[今週]X曜" - Remove "来週" matches first to avoid overlap
+        text_no_next = re.sub(r"来週\s*[月火水木金土日]", "", text)
+        for m in re.finditer(r"(?:今週\s*)?([月火水木金土日])曜", text_no_next):
+            target_wd = weekday_map[m.group(1)]
+            days_ahead = (target_wd - now.weekday()) % 7
+            if days_ahead == 0: days_ahead = 7
+            found_dates.append(now + timedelta(days=days_ahead))
+
+        # 3. M/D pattern (e.g. 2/20, 2月20日)
+        for m in re.finditer(r"(\d{1,2})[/月](\d{1,2})", text):
+            month = int(m.group(1))
+            day = int(m.group(2))
+            year = now.year
+            try:
+                target = JST.localize(datetime(year, month, day))
+                if target.date() < now.date():
+                    target = target.replace(year=year + 1)
+                found_dates.append(target)
+            except ValueError:
+                pass
+
+        # 4. D日 pattern (e.g. 20日) - Avoid matching parts of M/D
+        # Replace M/D matches with placeholders in temp string
+        text_temp = re.sub(r"\d{1,2}[/月]\d{1,2}", "", text)
+        for m in re.finditer(r"(\d{1,2})日", text_temp):
+            day = int(m.group(1))
+            year = now.year
+            month = now.month
+            try:
+                target = JST.localize(datetime(year, month, day))
+                # If date passed in this month, assume next month
+                if target.date() < now.date():
+                    month += 1
+                    if month > 12:
+                        month = 1
+                        year += 1
+                    target = JST.localize(datetime(year, month, day))
+                found_dates.append(target)
+            except ValueError:
+                pass
+        
+        # Sort and unique by date
+        unique_map = {}
+        for d in found_dates:
+            unique_map[d.date()] = d
+        
+        return sorted(list(unique_map.values()))
+
+    async def _process_select_date(self, reply_token, user_id, session, text, data):
+        """Handle date selection logic, supporting multiple dates."""
+        target_dates = self._parse_multiple_dates(text)
+        
+        if not target_dates:
+            await self.reply_text(
+                reply_token,
+                "日時が正しくありません。\nもう一度入力してください\n(例: 2.20, 明日, 土曜)",
+            )
+            return
+
+        store = data.get("store", "ebisu")
+        bookings = await self._get_bookings()
+        
+        # If single date found, proceed to select_time
+        if len(target_dates) == 1:
+            target_date = target_dates[0]
+            slots = get_available_slots(target_date, store, bookings)
+
+            date_str = target_date.strftime("%m/%d")
+            wd = WEEKDAY_JP[target_date.weekday()]
+            store_name = STORE_NAMES.get(store, store)
+
+            if not slots:
+                await self.reply_text(
+                    reply_token,
+                    f"😔 {date_str}（{wd}）は{store_name}の空きがありません。\n\n別の日時を入力してください📅",
+                )
+                return
+
+            data["date"] = target_date.strftime("%Y-%m-%d")
+            await db.set_session(
+                user_id, "booking", "select_time", json.dumps(data)
+            )
+
+            # Build quick reply with time slots
+            items = []
+            for slot in slots[:13]:
+                time_str = slot.strftime("%H:%M")
+                items.append(
+                    QuickReplyItem(
+                        action=MessageAction(label=f"{time_str}", text=time_str)
+                    )
+                )
+
+            slot_list = "\n".join(
+                [f"🕐 {s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
+            )
+
+            await self.reply_text(
+                reply_token,
+                f"📅 {date_str}（{wd}） {store_name}\n\n{slot_list}\n\nこちらはいかがでしょうか？\n時間を選択してください👇",
+                quick_reply=QuickReply(items=items),
+            )
+            return
+
+        # Multiple dates found: Show availability for all
+        msg_lines = []
+        store_name = STORE_NAMES.get(store, store)
+        
+        for td in target_dates:
+            slots = get_available_slots(td, store, bookings)
+            d_str = td.strftime("%m/%d")
+            wd = WEEKDAY_JP[td.weekday()]
+            
+            if slots:
+                slot_strs = [s.strftime("%H:%M") for s in slots]
+                if len(slot_strs) > 8:
+                    slot_strs = slot_strs[:8] + ["..."]
+                msg_lines.append(f"📅 {d_str}（{wd}）\n" + "  " + ", ".join(slot_strs))
+            else:
+                msg_lines.append(f"📅 {d_str}（{wd}）: 満席 🈵")
+        
+        final_msg = "\n\n".join(msg_lines)
+        if len(final_msg) > 1000:
+            final_msg = final_msg[:1000] + "\n..."
+            
+        await self.reply_text(
+             reply_token,
+             f"■ {store_name} の空き状況\n\n{final_msg}\n\nご希望の日時（1日）を指定してください！"
+        )
+        # Ensure session is in select_date
+        await db.set_session(user_id, "booking", "select_date", json.dumps(data))
 
     # ============================================================
     # Date query handler
@@ -554,60 +880,20 @@ class LINEService:
             )
 
         elif state == "select_date":
-            target_date = self._parse_date_query(text)
-            if not target_date:
-                await self.reply_text(
-                    reply_token,
-                    "日時が正しくありません。\nもう一度入力してください\n(例: 2.20, 明日)",
-                )
-                return
-
-            store = data.get("store", "ebisu")
-            bookings = await self._get_bookings()
-            slots = get_available_slots(target_date, store, bookings)
-
-            date_str = target_date.strftime("%m/%d")
-            wd = WEEKDAY_JP[target_date.weekday()]
-            store_name = STORE_NAMES.get(store, store)
-
-            if not slots:
-                await self.reply_text(
-                    reply_token,
-                    f"😔 {date_str}（{wd}）は{store_name}の空きがありません。\n\n別の日時を入力してください📅",
-                )
-                return
-
-            data["date"] = target_date.strftime("%Y-%m-%d")
-            await db.set_session(
-                user_id, "booking", "select_time", json.dumps(data)
-            )
-
-            # Build quick reply with time slots
-            items = []
-            for slot in slots[:13]:  # LINE Quick Reply max 13 items
-                time_str = slot.strftime("%H:%M")
-                items.append(
-                    QuickReplyItem(
-                        action=MessageAction(label=f"{time_str}", text=time_str)
-                    )
-                )
-
-            slot_list = "\n".join(
-                [f"🕐 {s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
-            )
-
-            await self.reply_text(
-                reply_token,
-                f"📅 {date_str}（{wd}） {store_name}\n\n{slot_list}\n\nこちらはいかがでしょうか？\n時間を選択してください👇",
-                quick_reply=QuickReply(items=items),
-            )
+            await self._process_select_date(reply_token, user_id, session, text, data)
 
         elif state == "select_time":
             m = re.match(r"(\d{1,2}):(\d{2})", text)
             if not m:
+                # Fallback: check if it matches a date
+                dates = self._parse_multiple_dates(text)
+                if dates:
+                    await self._process_select_date(reply_token, user_id, session, text, data)
+                    return
+
                 await self.reply_text(
                     reply_token,
-                    "時間の形式が正しくありません。\n例: 10:00",
+                    "時間の形式が正しくありません。\n例: 10:00\n\n別の日時なら「2/20」のように入力してね！",
                 )
                 return
 
