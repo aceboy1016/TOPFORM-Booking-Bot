@@ -830,7 +830,7 @@ class LINEService:
 
                 # 3. Success Message
                 if mode == "change":
-                    original_info = session.get("original_booking_info", {})
+                    original_info = data.get("original_booking_info", {})
                     orig_dt_str = original_info.get("dt", "")
                     orig_store = original_info.get("store", "")
                     
@@ -875,7 +875,7 @@ class LINEService:
                     display_name = user.get("display_name", "Unknown")
                     
                     if mode == "change":
-                        original_info = session.get("original_booking_info", {})
+                        original_info = data.get("original_booking_info", {})
                         print(f"DEBUG: original_info from session: {original_info}") # Debug log
                         orig_dt_str = original_info.get("dt", "")
                         orig_store = original_info.get("store", "")
