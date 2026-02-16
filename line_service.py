@@ -885,22 +885,21 @@ class LINEService:
                                 odt = datetime.fromisoformat(orig_dt_str)
                                 owd = WEEKDAY_JP[odt.weekday()]
                                 orig_text = (
-                                    f"🔻 変更前\n"
-                                    f"📅 {odt.strftime('%m/%d')}（{owd}） {odt.strftime('%H:%M')}\n"
-                                    f"📍 {orig_store}\n"
-                                    f"⬇️\n\n"
-                                    f"✅ 変更後"
+                                    f"\n▼ 変更前\n"
+                                    f" ・{odt.strftime('%m/%d')}（{owd}） {odt.strftime('%H:%M')}-\n"
+                                    f" ・{orig_store}\n\n"
+                                    f"↓↓↓↓↓\n\n"
+                                    f"▼ 変更後"
                                 )
                             except:
                                 pass
 
                         admin_msg = (
                             f"🔄 予約変更リクエスト\n"
-                            f"👤 {display_name}\n\n"
+                            f"👤 {display_name}\n"
                             f"{orig_text}\n"
-                            f"📅 {display_date}（{wd}）\n"
-                            f"🕐 {time_range}\n"
-                            f"📍 {store_display}\n\n"
+                            f" ・{display_date}（{wd}）{hour:02d}:{minute:02d}-\n"
+                            f" ・{store_display}\n\n"
                             f"⚠️ カレンダーを確認して更新してください！"
                         )
                     elif mode == "change_OLD_UNUSED":
