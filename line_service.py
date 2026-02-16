@@ -859,10 +859,11 @@ class LINEService:
                 else:
                     success_msg = (
                         f"✅ 仮予約を受け付けました！\n\n"
-                        f"📅 {display_date}（{wd}）\n"
-                        f"🕐 {time_range}\n"
-                        f"📍 {store_display}\n"
-                        f"🎫 受付No. {booking_id}\n\n"
+                        f"↓↓↓↓↓\n\n"
+                        f"▼ 予約内容\n"
+                        f" ・{display_date}（{wd}） {hour:02d}:{minute:02d}-\n"
+                        f" ・{store_display}\n"
+                        f" ・受付No. {booking_id}\n\n"
                         f"※ まだ予約は確定ではありません。\n"
                         f"スタッフが確認後、確定のご連絡をいたします📩"
                     )
@@ -914,12 +915,13 @@ class LINEService:
                         )
                     else:
                         admin_msg = (
-                            f"🔔 新規予約リクエスト\n"
-                            f"👤 {display_name}\n"
-                            f"📅 {display_date}（{wd}）\n"
-                            f"🕐 {time_range}\n"
-                            f"📍 {store_display}\n"
-                            f"🎫 No. {booking_id}\n\n"
+                            f"🆕 新規予約リクエスト\n"
+                            f"👤 {display_name}\n\n"
+                            f"↓↓↓↓↓\n\n"
+                            f"▼ 予約内容\n"
+                            f" ・{display_date}（{wd}）{hour:02d}:{minute:02d}-\n"
+                            f" ・{store_display}\n"
+                            f" ・No. {booking_id}\n\n"
                             f"⚠️ hacomono/カレンダーに登録してください！"
                         )
                         
