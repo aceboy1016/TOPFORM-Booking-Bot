@@ -359,319 +359,104 @@ class LINEService:
         """
         Parse natural language text for multiple dates.
         Examples:
-          「2/20, 2/21空いてる？」「2日と23日」
+          「2/20, 2/21空いてる？」「2日と23日」「3月の土曜日」「3月」
         """
         found_dates = []
         now = datetime.now(JST)
+        import calendar
+
+        # 0. Detect explicit Month context (e.g. "3月")
+        target_month_context = None
+        target_year_context = now.year
+        
+        m_month = re.search(r"(\d{1,2})月", text)
+        if m_month:
+            try:
+                m_val = int(m_month.group(1))
+                if 1 <= m_val <= 12:
+                    target_month_context = m_val
+                    if target_month_context < now.month:
+                        target_year_context += 1
+            except:
+                pass
 
         # 1. Keywords
-        if "今日" in text:
-            found_dates.append(now)
-        if "明日" in text:
-            found_dates.append(now + timedelta(days=1))
-        if "明後日" in text or "あさって" in text:
-            found_dates.append(now + timedelta(days=2))
+        if "今日" in text: found_dates.append(now)
+        if "明日" in text: found_dates.append(now + timedelta(days=1))
+        if "明後日" in text or "あさって" in text: found_dates.append(now + timedelta(days=2))
 
         # 2. Weekdays
         weekday_map = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
         
-        # "来週X曜"
+        # If month context exists, search for "X曜" in that month
+        if target_month_context:
+            detected_wds = []
+            for wd_char, wd_idx in weekday_map.items():
+                if f"{wd_char}曜" in text:
+                    detected_wds.append(wd_idx)
+            
+            if detected_wds:
+                _, last_day = calendar.monthrange(target_year_context, target_month_context)
+                for day in range(1, last_day + 1):
+                    dt = JST.localize(datetime(target_year_context, target_month_context, day))
+                    if dt.date() >= now.date() and dt.weekday() in detected_wds:
+                        found_dates.append(dt)
+
+        # "来週X曜" (Relative)
         for m in re.finditer(r"来週\s*([月火水木金土日])", text):
             target_wd = weekday_map[m.group(1)]
             days_ahead = (7 - now.weekday() + target_wd) % 7
             if days_ahead == 0: days_ahead = 7
             days_ahead += 7
-            # Adjust to ensure it's next week
-            current_wd = now.weekday()
-            days_ahead = (target_wd - current_wd) % 7 + 7
             found_dates.append(now + timedelta(days=days_ahead))
 
-        # "[今週]X曜" - Remove "来週" matches first to avoid overlap
-        text_no_next = re.sub(r"来週\s*[月火水木金土日]", "", text)
-        for m in re.finditer(r"(?:今週\s*)?([月火水木金土日])曜", text_no_next):
-            target_wd = weekday_map[m.group(1)]
-            days_ahead = (target_wd - now.weekday()) % 7
-            if days_ahead == 0: days_ahead = 7
-            found_dates.append(now + timedelta(days=days_ahead))
+        # "[今週]X曜" - Only if NO month context
+        if not target_month_context:
+            text_no_next = re.sub(r"来週\s*[月火水木金土日]", "", text)
+            for m in re.finditer(r"(?:今週\s*)?([月火水木金土日])曜", text_no_next):
+                target_wd = weekday_map[m.group(1)]
+                days_ahead = (target_wd - now.weekday()) % 7
+                if days_ahead == 0: days_ahead = 7
+                found_dates.append(now + timedelta(days=days_ahead))
 
-        # 3. M/D pattern (e.g. 2/20, 2月20日)
+        # 3. M/D pattern
         for m in re.finditer(r"(\d{1,2})[/月](\d{1,2})", text):
-            month = int(m.group(1))
-            day = int(m.group(2))
-            year = now.year
             try:
+                month = int(m.group(1))
+                day = int(m.group(2))
+                year = now.year
                 target = JST.localize(datetime(year, month, day))
                 if target.date() < now.date():
                     target = target.replace(year=year + 1)
                 found_dates.append(target)
-            except ValueError:
+            except:
                 pass
 
-        # 4. D日 pattern (e.g. 20日) - Avoid matching parts of M/D
-        # Replace M/D matches with placeholders in temp string
+        # 4. D日 pattern
         text_temp = re.sub(r"\d{1,2}[/月]\d{1,2}", "", text)
         for m in re.finditer(r"(\d{1,2})日", text_temp):
-            day = int(m.group(1))
-            year = now.year
-            month = now.month
             try:
+                day = int(m.group(1))
+                year = now.year
+                month = now.month
                 target = JST.localize(datetime(year, month, day))
-                # If date passed in this month, assume next month
                 if target.date() < now.date():
                     month += 1
-                    if month > 12:
-                        month = 1
-                        year += 1
+                    if month > 12: month = 1; year += 1
                     target = JST.localize(datetime(year, month, day))
                 found_dates.append(target)
-            except ValueError:
+            except:
                 pass
         
-        # Sort and unique by date
-        unique_map = {}
-        for d in found_dates:
-            unique_map[d.date()] = d
-        
-        return sorted(list(unique_map.values()))
+        # 5. Month only fallback
+        if target_month_context and not found_dates:
+            _, last_day = calendar.monthrange(target_year_context, target_month_context)
+            for day in range(1, last_day + 1):
+                dt = JST.localize(datetime(target_year_context, target_month_context, day))
+                if dt.date() >= now.date():
+                    found_dates.append(dt)
 
-    def _parse_date_query(self, text: str) -> Optional[datetime]:
-        """Wrapper for single date backward compatibility."""
-        dates = self._parse_multiple_dates(text)
-        return dates[0] if dates else None
-
-    def _parse_multiple_dates(self, text: str) -> list[datetime]:
-        """
-        Parse natural language text for multiple dates.
-        Examples:
-          「2/20, 2/21空いてる？」「2日と23日」
-        """
-        found_dates = []
-        now = datetime.now(JST)
-
-        # 1. Keywords
-        if "今日" in text:
-            found_dates.append(now)
-        if "明日" in text:
-            found_dates.append(now + timedelta(days=1))
-        if "明後日" in text or "あさって" in text:
-            found_dates.append(now + timedelta(days=2))
-
-        # 2. Weekdays
-        weekday_map = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
-        
-        # "来週X曜"
-        for m in re.finditer(r"来週\s*([月火水木金土日])", text):
-            target_wd = weekday_map[m.group(1)]
-            days_ahead = (7 - now.weekday() + target_wd) % 7
-            if days_ahead == 0: days_ahead = 7
-            days_ahead += 7
-            # Adjust to ensure it's next week
-            current_wd = now.weekday()
-            days_ahead = (target_wd - current_wd) % 7 + 7
-            found_dates.append(now + timedelta(days=days_ahead))
-
-        # "[今週]X曜" - Remove "来週" matches first to avoid overlap
-        text_no_next = re.sub(r"来週\s*[月火水木金土日]", "", text)
-        for m in re.finditer(r"(?:今週\s*)?([月火水木金土日])曜", text_no_next):
-            target_wd = weekday_map[m.group(1)]
-            days_ahead = (target_wd - now.weekday()) % 7
-            if days_ahead == 0: days_ahead = 7
-            found_dates.append(now + timedelta(days=days_ahead))
-
-        # 3. M/D pattern (e.g. 2/20, 2月20日)
-        for m in re.finditer(r"(\d{1,2})[/月](\d{1,2})", text):
-            month = int(m.group(1))
-            day = int(m.group(2))
-            year = now.year
-            try:
-                target = JST.localize(datetime(year, month, day))
-                if target.date() < now.date():
-                    target = target.replace(year=year + 1)
-                found_dates.append(target)
-            except ValueError:
-                pass
-
-        # 4. D日 pattern (e.g. 20日) - Avoid matching parts of M/D
-        # Replace M/D matches with placeholders in temp string
-        text_temp = re.sub(r"\d{1,2}[/月]\d{1,2}", "", text)
-        for m in re.finditer(r"(\d{1,2})日", text_temp):
-            day = int(m.group(1))
-            year = now.year
-            month = now.month
-            try:
-                target = JST.localize(datetime(year, month, day))
-                # If date passed in this month, assume next month
-                if target.date() < now.date():
-                    month += 1
-                    if month > 12:
-                        month = 1
-                        year += 1
-                    target = JST.localize(datetime(year, month, day))
-                found_dates.append(target)
-            except ValueError:
-                pass
-        
-        # Sort and unique by date
-        unique_map = {}
-        for d in found_dates:
-            unique_map[d.date()] = d
-        
-        return sorted(list(unique_map.values()))
-
-    def _parse_date_query(self, text: str) -> Optional[datetime]:
-        """
-        Parse natural language date queries.
-        Examples:
-          「2/20空いてる？」「2月20日は？」「明日空き」「来週月曜」
-        """
-        now = datetime.now(JST)
-
-        # Pattern: 明日 / 明後日 / 今日
-        if "今日" in text:
-            return now
-        if "明日" in text:
-            return now + timedelta(days=1)
-        if "明後日" in text or "あさって" in text:
-            return now + timedelta(days=2)
-
-        # Pattern: 来週[曜日]
-        weekday_map = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
-        m = re.search(r"来週\s*([月火水木金土日])", text)
-        if m:
-            target_wd = weekday_map[m.group(1)]
-            days_ahead = (7 - now.weekday() + target_wd) % 7
-            if days_ahead == 0:
-                days_ahead = 7
-            days_ahead += 7  # 来週
-            # Adjust: 来週 means next week, so add enough days
-            current_wd = now.weekday()
-            days_ahead = (target_wd - current_wd) % 7 + 7
-            return now + timedelta(days=days_ahead)
-
-        # Pattern: [曜日] (this week / next occurrence)
-        m = re.search(r"(?:今週\s*)?([月火水木金土日])曜", text)
-        if m:
-            target_wd = weekday_map[m.group(1)]
-            days_ahead = (target_wd - now.weekday()) % 7
-            if days_ahead == 0:
-                days_ahead = 7  # 今日の曜日なら来週
-            return now + timedelta(days=days_ahead)
-
-        # Pattern: M/D or M月D日
-        m = re.search(r"(\d{1,2})[/月](\d{1,2})", text)
-        if m:
-            month = int(m.group(1))
-            day = int(m.group(2))
-            year = now.year
-            try:
-                target = JST.localize(datetime(year, month, day))
-                # If the date is in the past, assume next year
-                if target.date() < now.date():
-                    target = target.replace(year=year + 1)
-                return target
-            except ValueError:
-                return None
-
-        # Pattern: D日
-        m = re.search(r"(\d{1,2})日", text)
-        if m:
-            day = int(m.group(1))
-            year = now.year
-            month = now.month
-            try:
-                target = JST.localize(datetime(year, month, day))
-                if target.date() < now.date():
-                    # Next month
-                    month += 1
-                    if month > 12:
-                        month = 1
-                        year += 1
-                    target = JST.localize(datetime(year, month, day))
-                return target
-            except ValueError:
-                return None
-
-        # Check if text contains availability keywords without a date
-        availability_keywords = ["空い", "空き", "予約したい", "取りたい"]
-        if any(kw in text for kw in availability_keywords):
-            # No specific date found, but user is asking about availability
-            return None  # Will be handled differently
-
-        return None
-
-    def _parse_multiple_dates(self, text: str) -> list[datetime]:
-        """
-        Parse natural language text for multiple dates.
-        Examples:
-          「2/20, 2/21空いてる？」「2日と23日」
-        """
-        found_dates = []
-        now = datetime.now(JST)
-
-        # 1. Keywords
-        if "今日" in text:
-            found_dates.append(now)
-        if "明日" in text:
-            found_dates.append(now + timedelta(days=1))
-        if "明後日" in text or "あさって" in text:
-            found_dates.append(now + timedelta(days=2))
-
-        # 2. Weekdays
-        weekday_map = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
-        
-        # "来週X曜"
-        for m in re.finditer(r"来週\s*([月火水木金土日])", text):
-            target_wd = weekday_map[m.group(1)]
-            days_ahead = (7 - now.weekday() + target_wd) % 7
-            if days_ahead == 0: days_ahead = 7
-            days_ahead += 7
-            # Adjust to ensure it's next week
-            current_wd = now.weekday()
-            days_ahead = (target_wd - current_wd) % 7 + 7
-            found_dates.append(now + timedelta(days=days_ahead))
-
-        # "[今週]X曜" - Remove "来週" matches first to avoid overlap
-        text_no_next = re.sub(r"来週\s*[月火水木金土日]", "", text)
-        for m in re.finditer(r"(?:今週\s*)?([月火水木金土日])曜", text_no_next):
-            target_wd = weekday_map[m.group(1)]
-            days_ahead = (target_wd - now.weekday()) % 7
-            if days_ahead == 0: days_ahead = 7
-            found_dates.append(now + timedelta(days=days_ahead))
-
-        # 3. M/D pattern (e.g. 2/20, 2月20日)
-        for m in re.finditer(r"(\d{1,2})[/月](\d{1,2})", text):
-            month = int(m.group(1))
-            day = int(m.group(2))
-            year = now.year
-            try:
-                target = JST.localize(datetime(year, month, day))
-                if target.date() < now.date():
-                    target = target.replace(year=year + 1)
-                found_dates.append(target)
-            except ValueError:
-                pass
-
-        # 4. D日 pattern (e.g. 20日) - Avoid matching parts of M/D
-        # Replace M/D matches with placeholders in temp string
-        text_temp = re.sub(r"\d{1,2}[/月]\d{1,2}", "", text)
-        for m in re.finditer(r"(\d{1,2})日", text_temp):
-            day = int(m.group(1))
-            year = now.year
-            month = now.month
-            try:
-                target = JST.localize(datetime(year, month, day))
-                # If date passed in this month, assume next month
-                if target.date() < now.date():
-                    month += 1
-                    if month > 12:
-                        month = 1
-                        year += 1
-                    target = JST.localize(datetime(year, month, day))
-                found_dates.append(target)
-            except ValueError:
-                pass
-        
-        # Sort and unique by date
+        # Sort and unique
         unique_map = {}
         for d in found_dates:
             unique_map[d.date()] = d
