@@ -311,7 +311,8 @@ class LINEService:
             return
 
         if "予約" in text or "booking" in text.lower():
-            await self._start_booking_flow(reply_token, user_id, user)
+            force_select = "店舗変更" in text or "変更" in text
+            await self._start_booking_flow(reply_token, user_id, user, force_store_select=force_select)
             return
             
         # (Old ID check removed from here)
@@ -596,20 +597,57 @@ class LINEService:
         msg_lines = []
         store_name = STORE_NAMES.get(store, store)
         
+        # --- Time Filter Logic (案2: 時間帯検索) ---
+        filter_start_hour = None
+        filter_end_hour = None
+        filter_note = ""
+        
+        if "午前" in text or "朝" in text:
+            filter_end_hour = 12
+            filter_note = "（午前中）"
+        elif "午後" in text:
+            filter_start_hour = 12
+            filter_note = "（午後）"
+        elif "夜" in text or "夕方" in text:
+            filter_start_hour = 17
+            filter_note = "（17時以降）"
+            
+        m_after = re.search(r"(\d{1,2})時以降", text)
+        if m_after:
+            filter_start_hour = int(m_after.group(1))
+            filter_note = f"（{filter_start_hour}時以降）"
+
         for td in target_dates:
-            slots = get_available_slots(td, store, bookings)
+            open_slots = get_available_slots(td, store, bookings)
+            
+            # Apply Filter
+            filtered_slots = open_slots
+            if filter_start_hour is not None:
+                filtered_slots = [s for s in filtered_slots if s.hour >= filter_start_hour]
+            if filter_end_hour is not None:
+                filtered_slots = [s for s in filtered_slots if s.hour < filter_end_hour]
+
             d_str = td.strftime("%m/%d")
             wd = WEEKDAY_JP[td.weekday()]
             
-            if slots:
-                slot_strs = [s.strftime("%H:%M") for s in slots]
+            if filtered_slots:
+                slot_strs = [s.strftime("%H:%M") for s in filtered_slots]
                 if len(slot_strs) > 6:
                     slot_strs = slot_strs[:6] + ["..."]
                 msg_lines.append(f"📅 {d_str}（{wd}）
 " + "  " + ", ".join(slot_strs))
             else:
-                msg_lines.append(f"📅 {d_str}（{wd}）: 満席 🈵")
+                # If filtered out completely, don't shown
+                # only show if NO filter was applied and it was full
+                if not (filter_start_hour or filter_end_hour):
+                    msg_lines.append(f"📅 {d_str}（{wd}）: 満席 🈵")
         
+        if not msg_lines:
+             if filter_start_hour or filter_end_hour:
+                 msg_lines.append("ご希望の時間帯に空きは見つかりませんでした🙇‍♂️")
+             else:
+                 msg_lines.append("ご希望の日程に空きは見つかりませんでした🙇‍♂️")
+
         final_msg = "
 
 ".join(msg_lines)
@@ -619,16 +657,15 @@ class LINEService:
             
         await self.reply_text(
              reply_token,
-             f"■ {store_name} の空き状況
+             f"■ {store_name} の空き状況 {filter_note}
 
 {final_msg}
 
 ご希望の日時（1日）を指定してください！"
         )
         # Ensure session is in select_date
-        await db.set_session(user_id, "booking", "select_date", json.dumps(data))
-
-    # ============================================================
+        bookings_data = bookings # keep reference if needed
+        await db.set_session(user_id, "booking", "select_date", json.dumps(data))    # ============================================================
     # Date query handler
     # ============================================================
     async def _handle_date_query(
@@ -664,12 +701,40 @@ class LINEService:
     # ============================================================
     # Booking flow
     # ============================================================
-    async def _start_booking_flow(self, reply_token: str, user_id: str, user: dict):
+    async def _start_booking_flow(self, reply_token: str, user_id: str, user: dict, force_store_select: bool = False):
         """Start the interactive booking flow."""
         # Pre-fill data with user preferences
         initial_data = {}
-        if user.get("store_pref"):
-            initial_data["store"] = user["store_pref"]
+        store_pref = user.get("store_pref")
+        
+        # Check if we can skip store selection
+        if store_pref and not force_store_select:
+             store_code = "ebisu" if "恵比寿" in store_pref else "hanzomon"
+             initial_data["store"] = store_code
+             if user.get("room_pref"):
+                 initial_data["room_pref"] = user.get("room_pref")
+             
+             # Skip to date selection
+             await db.set_session(
+                 user_id, "booking", "select_date", json.dumps(initial_data)
+             )
+             
+             store_display = "恵比寿店" if store_code == "ebisu" else "半蔵門店"
+             
+             await self.reply_text(
+                reply_token,
+                f"いつもの {store_display} ですね！🏢
+ご希望の日時を入力してください📅
+(例: 2/20, 明日, 来週の土曜)
+
+※店舗を変更したい場合は「店舗変更」と入力してください。",
+                quick_reply=QuickReply(items=[
+                    QuickReplyItem(action=MessageAction(label="店舗を変更する", text="予約 店舗変更"))
+                ])
+             )
+             return
+
+        # Normal Flow: Select Store
         if user.get("room_pref"):
             initial_data["room_pref"] = user["room_pref"]
 
