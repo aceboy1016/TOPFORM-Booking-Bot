@@ -852,7 +852,7 @@ class LINEService:
                     success_msg = (
                         f"🔄 変更リクエストを受け付けました！\n\n"
                         f"{orig_text_user}"
-                        f" ・{display_date}（{wd}） {time_range}\n"
+                        f" ・{display_date}（{wd}）{hour:02d}:{minute:02d}-\n"
                         f" ・{store_display}\n\n"
                         f"スタッフが確認後、確定のご連絡をいたします📩"
                     )
