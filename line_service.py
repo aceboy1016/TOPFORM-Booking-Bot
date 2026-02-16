@@ -255,10 +255,10 @@ class LINEService:
             confirm_text = "承知しました。以下の予約を変更しますね。\n"
             if dt_display:
                 confirm_text += f"\n📅 {dt_display}"
-            if original_store:
-                confirm_text += f"\n📍 {original_store}"
-            
-            messages.append(TextMessage(text=confirm_text))
+                if original_store:
+                    confirm_text += f"\n ・{original_store}"
+                
+                confirm_text += "\n\n↓↓↓↓↓"
             
             # 2. Prompt for new store (or same store)
             prompt_text = "変更後の店舗を選んでください！\n（日時だけ変更する場合も、店舗を選んでください）"
@@ -843,7 +843,7 @@ class LINEService:
                                 f"▼ 変更前\n"
                                 f" ・{odt.strftime('%m/%d')}（{owd}） {odt.strftime('%H:%M')}-\n"
                                 f" ・{orig_store}\n\n"
-                                f"⬇⬇⬇⬇⬇\n\n"
+                                f"↓↓↓↓↓\n\n"
                                 f"▼ 変更後\n"
                             )
                         except:
