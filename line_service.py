@@ -204,6 +204,7 @@ class LINEService:
             await self._show_booking_change_list(reply_token, user_id, user, offset)
 
         if action == "select_change_booking":
+            print(f"DEBUG: select_change_booking data: {data}") # Debug log
             booking_id = data.get("booking_id")
             b_type = data.get("type")
             
@@ -852,6 +853,7 @@ class LINEService:
                     
                     if mode == "change":
                         original_info = session.get("original_booking_info", {})
+                        print(f"DEBUG: original_info from session: {original_info}") # Debug log
                         orig_dt_str = original_info.get("dt", "")
                         orig_store = original_info.get("store", "")
                         
