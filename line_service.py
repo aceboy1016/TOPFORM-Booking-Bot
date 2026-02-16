@@ -493,7 +493,7 @@ class LINEService:
                 data["suggested_dates"] = sug
         # ------------------------
 
-        # If single date found, proceed to select_time
+        # If single date found
         if len(target_dates) == 1:
             target_date = target_dates[0]
             slots = get_available_slots(target_date, store, bookings)
@@ -510,6 +510,55 @@ class LINEService:
 別の日時を入力してください📅",
                 )
                 return
+
+            # --- One-shot DateTime Check (案1: 日時一発指定) ---
+            # Check if time is also provided in text (e.g. "10:00")
+            m_time = re.search(r"(\d{1,2})[:：](\d{2})", text)
+            if m_time:
+                hour = int(m_time.group(1))
+                minute = int(m_time.group(2))
+                
+                # Check availability for this specific time
+                is_available = False
+                for s in slots:
+                    if s.hour == hour and s.minute == minute:
+                        is_available = True
+                        break
+                
+                if is_available:
+                    # Move state to select_time, effectively pre-selecting date
+                    data["date"] = target_date.strftime("%Y-%m-%d")
+                    await db.set_session(
+                        user_id, "booking", "select_time", json.dumps(data)
+                    )
+                    
+                    # Confirm with user
+                    time_str = f"{hour:02d}:{minute:02d}"
+                    confirm_text = (
+                        f"📅 {date_str}（{wd}） {time_str}
+"
+                        f"📍 {store_name}
+
+"
+                        f"こちらの内容で予約手続きを進めますか？"
+                    )
+                    
+                    # Button sends the time string back, triggering select_time logic
+                    yes_action = MessageAction(label="はい、予約する", text=time_str)
+                    
+                    # "Show other times" button sends the DATE string back, triggering select_date logic (fallback in select_time)
+                    other_action = MessageAction(label="他の時間を見る", text=date_str)
+
+                    await self.reply_text(
+                        reply_token,
+                        confirm_text,
+                        quick_reply=QuickReply(items=[
+                            QuickReplyItem(action=yes_action),
+                            QuickReplyItem(action=other_action)
+                        ])
+                    )
+                    return
+            # -------------------------------------
 
             data["date"] = target_date.strftime("%Y-%m-%d")
             await db.set_session(
