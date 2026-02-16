@@ -212,6 +212,16 @@ class LINEService:
             original_dt = data.get("dt")
             original_store = data.get("store")
             
+            # Format original date/time for display
+            dt_display = ""
+            if original_dt:
+                try:
+                    dt_obj = datetime.fromisoformat(original_dt)
+                    wd = WEEKDAY_JP[dt_obj.weekday()]
+                    dt_display = f"{dt_obj.strftime('%m/%d')}（{wd}） {dt_obj.strftime('%H:%M')}"
+                except:
+                    dt_display = original_dt
+
             session_data = {
                 "mode": "change",
                 "target_booking_id": booking_id,
@@ -237,11 +247,24 @@ class LINEService:
                     ),
                 ]
             )
-            await self.reply_text(
-                reply_token,
-                "🔄 変更後の店舗を選んでください。",
-                quick_reply=quick_reply
-            )
+            
+            # Create messages
+            messages = []
+            
+            # 1. Confirmation Message
+            confirm_text = "承知しました。以下の予約を変更しますね。\n"
+            if dt_display:
+                confirm_text += f"\n📅 {dt_display}"
+            if original_store:
+                confirm_text += f"\n📍 {original_store}"
+            
+            messages.append(TextMessage(text=confirm_text))
+            
+            # 2. Prompt for new store (or same store)
+            prompt_text = "変更後の店舗を選んでください。\n（日時だけ変更する場合も、店舗を選んでください）"
+            messages.append(TextMessage(text=prompt_text, quick_reply=quick_reply))
+            
+            await self.reply_messages(reply_token, messages)
 
     # ============================================================
     # Main message handler
