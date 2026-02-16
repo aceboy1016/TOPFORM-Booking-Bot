@@ -261,7 +261,7 @@ class LINEService:
             messages.append(TextMessage(text=confirm_text))
             
             # 2. Prompt for new store (or same store)
-            prompt_text = "変更後の店舗を選んでください。\n（日時だけ変更する場合も、店舗を選んでください）"
+            prompt_text = "変更後の店舗を選んでください！\n（日時だけ変更する場合も、店舗を選んでください）"
             messages.append(TextMessage(text=prompt_text, quick_reply=quick_reply))
             
             await self.reply_messages(reply_token, messages)
@@ -840,11 +840,11 @@ class LINEService:
                             odt = datetime.fromisoformat(orig_dt_str)
                             owd = WEEKDAY_JP[odt.weekday()]
                             orig_text_user = (
-                                f"🔻 変更前\n"
-                                f"📅 {odt.strftime('%m/%d')}（{owd}） {odt.strftime('%H:%M')}\n"
-                                f"📍 {orig_store}\n"
-                                f"⬇️\n\n"
-                                f"✅ 変更後\n"
+                                f"▼ 変更前\n"
+                                f" ・{odt.strftime('%m/%d')}（{owd}） {odt.strftime('%H:%M')}-\n"
+                                f" ・{orig_store}\n\n"
+                                f"⬇⬇⬇⬇⬇\n\n"
+                                f"▼ 変更後\n"
                             )
                         except:
                             pass
@@ -852,9 +852,8 @@ class LINEService:
                     success_msg = (
                         f"🔄 変更リクエストを受け付けました！\n\n"
                         f"{orig_text_user}"
-                        f"📅 {display_date}（{wd}）\n"
-                        f"🕐 {time_range}\n"
-                        f"📍 {store_display}\n\n"
+                        f" ・{display_date}（{wd}） {time_range}\n"
+                        f" ・{store_display}\n\n"
                         f"スタッフが確認後、確定のご連絡をいたします📩"
                     )
                 else:
