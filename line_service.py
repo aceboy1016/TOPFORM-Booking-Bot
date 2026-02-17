@@ -471,9 +471,9 @@ class LINEService:
         if not target_dates:
             await self.reply_text(
                 reply_token,
-                "日時が正しくありません。
+                """日時が正しくありません。
 もう一度入力してください
-(例: 2.20, 明日, 土曜)",
+(例: 2.20, 明日, 土曜)""",
             )
             return
 
@@ -506,9 +506,9 @@ class LINEService:
             if not slots:
                 await self.reply_text(
                     reply_token,
-                    f"😔 {date_str}（{wd}）は{store_name}の空きがありません。
+                    f"""😔 {date_str}（{wd}）は{store_name}の空きがありません。
 
-別の日時を入力してください📅",
+別の日時を入力してください📅""",
                 )
                 return
 
@@ -536,11 +536,8 @@ class LINEService:
                     # Confirm with user
                     time_str = f"{hour:02d}:{minute:02d}"
                     confirm_text = (
-                        f"📅 {date_str}（{wd}） {time_str}
-"
-                        f"📍 {store_name}
-
-"
+                        f"📅 {date_str}（{wd}） {time_str}\n"
+                        f"📍 {store_name}\n\n"
                         f"こちらの内容で予約手続きを進めますか？"
                     )
                     
@@ -576,19 +573,18 @@ class LINEService:
                     )
                 )
 
-            slot_list = "
-".join(
+            slot_list = "\n".join(
                 [f"🕐 {s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
             )
 
             await self.reply_text(
                 reply_token,
-                f"📅 {date_str}（{wd}） {store_name}
+                f"""📅 {date_str}（{wd}） {store_name}
 
 {slot_list}
 
 こちらはいかがでしょうか？
-時間を選択してください👇",
+時間を選択してください👇""",
                 quick_reply=QuickReply(items=items),
             )
             return
@@ -634,8 +630,7 @@ class LINEService:
                 slot_strs = [s.strftime("%H:%M") for s in filtered_slots]
                 if len(slot_strs) > 6:
                     slot_strs = slot_strs[:6] + ["..."]
-                msg_lines.append(f"📅 {d_str}（{wd}）
-" + "  " + ", ".join(slot_strs))
+                msg_lines.append(f"📅 {d_str}（{wd}）\n" + "  " + ", ".join(slot_strs))
             else:
                 # If filtered out completely, don't shown
                 # only show if NO filter was applied and it was full
@@ -648,20 +643,17 @@ class LINEService:
              else:
                  msg_lines.append("ご希望の日程に空きは見つかりませんでした🙇‍♂️")
 
-        final_msg = "
-
-".join(msg_lines)
+        final_msg = "\n\n".join(msg_lines)
         if len(final_msg) > 1000:
-            final_msg = final_msg[:1000] + "
-..."
+            final_msg = final_msg[:1000] + "\n..."
             
         await self.reply_text(
              reply_token,
-             f"■ {store_name} の空き状況 {filter_note}
+             f"""■ {store_name} の空き状況 {filter_note}
 
 {final_msg}
 
-ご希望の日時（1日）を指定してください！"
+ご希望の日時（1日）を指定してください！"""
         )
         # Ensure session is in select_date
         bookings_data = bookings # keep reference if needed
@@ -723,11 +715,11 @@ class LINEService:
              
              await self.reply_text(
                 reply_token,
-                f"いつもの {store_display} ですね！🏢
+                f"""いつもの {store_display} ですね！🏢
 ご希望の日時を入力してください📅
 (例: 2/20, 明日, 来週の土曜)
 
-※店舗を変更したい場合は「店舗変更」と入力してください。",
+※店舗を変更したい場合は「店舗変更」と入力してください。""",
                 quick_reply=QuickReply(items=[
                     QuickReplyItem(action=MessageAction(label="店舗を変更する", text="予約 店舗変更"))
                 ])
@@ -1099,12 +1091,12 @@ class LINEService:
                             seen.add(d)
                     
                     if valid_suggestions:
-                        success_msg += "
+                        success_msg += """
 
 ━━━━━━━━━━━━━━━
 
 💡 続けて他の日程も予約しますか？
-（候補日をタップですぐ確認できます）"
+（候補日をタップですぐ確認できます）"""
                         items = []
                         for sd_str in valid_suggestions[:10]:
                             try:
