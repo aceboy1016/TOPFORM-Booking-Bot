@@ -6,7 +6,7 @@ TOPFORM LINE Bot - Main Application
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import (
@@ -93,7 +93,7 @@ async def health_check():
 # LINE Webhook
 # ============================================================
 @app.post("/webhook")
-async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
+async def webhook_handler(request: Request):
     """LINE Webhook endpoint."""
     signature = request.headers.get("X-Line-Signature", "")
     if not signature:
@@ -106,22 +106,32 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
         parser = WebhookParser(settings.LINE_CHANNEL_SECRET)
         events = parser.parse(body_text, signature)
 
+        print(f"📩 Webhook received: {len(events)} event(s)")
+
         for event in events:
-            background_tasks.add_task(process_event, event)
+            # Use asyncio.ensure_future instead of BackgroundTasks
+            # BackgroundTasks runs AFTER the response is sent, which can
+            # conflict with Render's free tier spin-down behavior.
+            asyncio.ensure_future(process_event(event))
 
         return JSONResponse(content={"status": "ok"})
 
     except InvalidSignatureError:
+        print("❌ Invalid signature!")
         raise HTTPException(status_code=400, detail="Invalid signature")
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"❌ Webhook error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
 async def process_event(event):
     """Process a single LINE event."""
+    event_type = type(event).__name__
     try:
         user_id = event.source.user_id
+        print(f"🔄 Processing {event_type} from {user_id[:8]}...")
         
         # Get or create user for all event types
         # This ensures we have display_name even for postbacks
@@ -129,18 +139,28 @@ async def process_event(event):
         user = await db.get_or_create_user(user_id, display_name)
 
         if isinstance(event, FollowEvent):
+            print(f"  👤 Follow event")
             await line_service.handle_follow_event(event)
 
         elif isinstance(event, MessageEvent):
             # Handle text messages
             if isinstance(event.message, TextMessageContent):
+                print(f"  💬 Text: {event.message.text[:50]}")
                 await line_service.handle_text_message(event, user)
+            else:
+                print(f"  📎 Non-text message: {type(event.message).__name__}")
         
         elif isinstance(event, PostbackEvent):
+            print(f"  🔘 Postback: {event.postback.data[:50]}")
             await line_service.handle_postback_event(event, user)
+        
+        else:
+            print(f"  ⏭️ Unhandled event type: {event_type}")
+
+        print(f"✅ {event_type} processed successfully")
 
     except Exception as e:
-        print(f"Error processing event: {e}")
+        print(f"❌ Error processing {event_type}: {e}")
         import traceback
         traceback.print_exc()
 
