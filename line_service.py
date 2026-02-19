@@ -158,12 +158,173 @@ class LINEService:
             user["store_pref"] = customer.get("store_pref")
             user["room_pref"] = customer.get("room_pref")
 
-        if action == "cancel_request":
+        # --- 共通処理: 日時チェック用関数 ---
+        def is_within_deadline(booking_dt_iso: str) -> bool:
+            if not booking_dt_iso:
+                return False
+            try:
+                booking_dt = datetime.fromisoformat(booking_dt_iso)
+                if booking_dt.tzinfo is None:
+                    booking_dt = JST.localize(booking_dt)
+                
+                now = datetime.now(JST)
+                diff = booking_dt - now
+                # 3時間未満ならTrue (deadline exceeded)
+                return diff.total_seconds() < (settings.BOOKING_DEADLINE_HOURS * 3600)
+            except Exception:
+                return False
+
+        # --- Action Handlers ---
+
+        if action == "force_cancel_confirm":
+            # 直前キャンセルの最終確認「はい」が押された場合
             booking_id = data.get("booking_id")
             booking_date = data.get("date")
             store_name = data.get("store")
-            
+            old_dt_iso = data.get("dt_iso") # Not strictly needed but kept for consistency
+
             # Cancel in DB
+            success = await db.cancel_booking(booking_id, user_id)
+            
+            if success:
+                # Notify User
+                await self.reply_text(
+                    reply_token,
+                    f"承知いたしました。\n"
+                    f"直前キャンセルの旨、担当（石原）に通知いたしました。\n"
+                    f"またのご予約をお待ちしております。"
+                )
+                
+                # Notify Admin (Special Message)
+                if settings.ADMIN_USER_ID:
+                    display_name = user.get("display_name", "Unknown")
+                    booking_dt_str = "不明"
+                    if old_dt_iso:
+                        try:
+                           dt_obj = datetime.fromisoformat(old_dt_iso)
+                           booking_dt_str = dt_obj.strftime('%m/%d %H:%M')
+                        except: pass
+
+                    admin_msg = (
+                        f"🚨 直前キャンセル連絡\n"
+                        f"From: {display_name} 様\n"
+                        f"予約: {booking_date}\n"
+                        f"店舗: {store_name}\n"
+                        f"------------------\n"
+                        f"※3時間以内の変更操作のため、\n"
+                        f"キャンセル扱いとして通知されました。\n"
+                        f"必要に応じて連絡を取ってください。"
+                    )
+                    try:
+                        await self.push_text(settings.ADMIN_USER_ID, admin_msg)
+                    except Exception as e:
+                        print(f"Admin notification failed: {e}")
+                
+                self._invalidate_cache()
+            else:
+                await self.reply_text(
+                    reply_token,
+                    "⚠️ エラーが発生しました。すでにキャンセルされている可能性があります。"
+                )
+
+
+        elif action == "cancel_request":
+            booking_id = data.get("booking_id")
+            booking_date = data.get("date") # Display text like "2/20 10:00"
+            store_name = data.get("store")
+            booking_dt_iso = data.get("dt_iso") # ISO string for logic
+
+            # 3時間ルールチェック
+            if is_within_deadline(booking_dt_iso):
+                # 確認ダイアログを出す
+                confirm_data = json.dumps({
+                    "action": "force_cancel_confirm",
+                    "booking_id": booking_id,
+                    "date": booking_date,
+                    "store": store_name,
+                    "dt_iso": booking_dt_iso
+                })
+                
+                # Show warning
+                msg = (
+                    f"⚠️ 予約時間の{settings.BOOKING_DEADLINE_HOURS}時間を切っています。\n\n"
+                    f"これ以降の変更はキャンセル扱いとなります。\n"
+                    f"その旨、担当（石原）に通知しますがよろしいでしょうか？"
+                )
+                
+                quick_reply = QuickReply(
+                    items=[
+                        QuickReplyItem(
+                            action=MessageAction(label="はい、連絡する", text="はい")
+                        ),
+                        QuickReplyItem(
+                            action=MessageAction(label="いいえ", text="いいえ")
+                        )
+                    ]
+                )
+                
+                # Note: QuickReply action "text" sends a user message. 
+                # To trigger the postback, we need a PostbackAction in the QuickReply or interactive button.
+                # However, QuickReply is easy. Let's use Buttons Template or just ask user to press a Postback Button.
+                # Updating to use Button Template for specific action is better.
+                
+                # Let's use `reply_flex` for a nice confirmation box
+                flex = {
+                    "type": "bubble",
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "⚠️ 直前キャンセルの確認",
+                                "weight": "bold",
+                                "color": "#ff0000",
+                                "size": "md"
+                            },
+                            {
+                                "type": "text",
+                                "text": msg,
+                                "wrap": True,
+                                "size": "sm",
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    },
+                    "footer": {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "spacing": "md",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "action": {
+                                    "type": "postback",
+                                    "label": "はい",
+                                    "data": confirm_data,
+                                    "displayText": "はい、連絡してください"
+                                },
+                                "style": "primary",
+                                "color": "#cc0000"
+                            },
+                            {
+                                "type": "button",
+                                "action": {
+                                    "type": "message",
+                                    "label": "いいえ",
+                                    "text": "キャンセルをやめる"
+                                },
+                                "style": "secondary"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                }
+                await self.reply_flex(reply_token, "直前キャンセルの確認", flex)
+                return
+
+            # Normal Cancel Flow (Over 3 hours)
             success = await db.cancel_booking(booking_id, user_id)
             
             if success:
@@ -184,8 +345,7 @@ class LINEService:
                         f"👤 {display_name}\n"
                         f"📅 {booking_date}\n"
                         f"📍 {store_name}\n"
-                        f"🎫 No. {booking_id}\n\n"
-                        f"⚠️ hacomono/カレンダーの予定を削除してください！"
+                        f"🎫 No. {booking_id}\n"
                     )
                     try:
                         await self.push_text(settings.ADMIN_USER_ID, admin_msg)
@@ -198,19 +358,102 @@ class LINEService:
                     reply_token,
                     "⚠️ すでにキャンセルされているか、予約が見つかりませんでした。"
                 )
+                
 
         if action == "change_list_more":
             offset = data.get("offset", 0)
             await self._show_booking_change_list(reply_token, user_id, user, offset)
 
         if action == "select_change_booking":
-            print(f"DEBUG: select_change_booking data: {data}") # Debug log
+            # 予約変更ボタンが押されたとき
             booking_id = data.get("booking_id")
             b_type = data.get("type")
-            
-            # Start booking flow in "change" mode
-            original_dt = data.get("dt")
+            original_dt_iso = data.get("dt") # ISO format
             original_store = data.get("store")
+            
+            # 3時間ルールチェック
+            if is_within_deadline(original_dt_iso):
+                # 変更不可ロジックへ誘導（＝直前キャンセル確認）
+                
+                # Format date for display
+                dt_display = original_dt_iso
+                try:
+                    dt_obj = datetime.fromisoformat(original_dt_iso)
+                    dt_display = dt_obj.strftime('%m/%d %H:%M')
+                except: pass
+
+                # 確認ダイアログデータ
+                confirm_data = json.dumps({
+                    "action": "force_cancel_confirm",
+                    "booking_id": booking_id,
+                    "date": dt_display,
+                    "store": original_store,
+                    "dt_iso": original_dt_iso
+                })
+
+                msg = (
+                    f"⚠️ 予約時間の{settings.BOOKING_DEADLINE_HOURS}時間を切っているため、日時の変更はできません。\n\n"
+                    f"このまま手続きを進めると「キャンセル扱い」となります。\n"
+                    f"その旨、担当（石原）に通知しますがよろしいでしょうか？"
+                )
+
+                flex = {
+                    "type": "bubble",
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "⚠️ 変更不可・キャンセル確認",
+                                "weight": "bold",
+                                "color": "#ff0000",
+                                "size": "md"
+                            },
+                            {
+                                "type": "text",
+                                "text": msg,
+                                "wrap": True,
+                                "size": "sm",
+                                "margin": "md"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    },
+                    "footer": {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "spacing": "md",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "action": {
+                                    "type": "postback",
+                                    "label": "はい",
+                                    "data": confirm_data,
+                                    "displayText": "はい、連絡してください（キャンセル）"
+                                },
+                                "style": "primary",
+                                "color": "#cc0000"
+                            },
+                            {
+                                "type": "button",
+                                "action": {
+                                    "type": "message",
+                                    "label": "いいえ",
+                                    "text": "変更をやめる"
+                                },
+                                "style": "secondary"
+                            }
+                        ],
+                        "paddingAll": "20px"
+                    }
+                }
+                await self.reply_flex(reply_token, "直前キャンセルの確認", flex)
+                return
+
+            # Normal Change Flow (Over 3 hours)
+            original_dt = data.get("dt")
             
             # Format original date/time for display
             dt_display = ""
