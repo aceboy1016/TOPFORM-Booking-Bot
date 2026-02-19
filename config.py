@@ -72,7 +72,8 @@ CALENDAR_IDS = {
 # ============================================================
 SESSION_DURATION = 60  # minutes
 TRAVEL_TIME = 60  # minutes (恵比寿⇔半蔵門の移動時間)
-BOOKING_DEADLINE_HOURS = 3  # 予約締切：3時間前
+BOOKING_DEADLINE_HOURS = 12  # 予約変更・キャンセル締切（1回消化）：12時間前
+URGENT_CONTACT_DEADLINE_HOURS = 3  # 直前連絡デッドライン（管理者通知）：3時間前
 ADVANCE_BOOKING_MONTHS = 2  # 2ヶ月先まで予約可
 
 # 営業時間

@@ -144,6 +144,61 @@ class LINEService:
     # ============================================================
     # Postback handler
     # ============================================================
+    def _build_confirm_flex(self, title, message, ok_label, ok_data, ok_color):
+        """Build a confirmation Flex Message"""
+        return {
+            "type": "bubble",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": title,
+                        "weight": "bold",
+                        "color": "#ff0000",
+                        "size": "md"
+                    },
+                    {
+                        "type": "text",
+                        "text": message,
+                        "wrap": True,
+                        "size": "sm",
+                        "margin": "md"
+                    }
+                ],
+                "paddingAll": "20px"
+            },
+            "footer": {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "md",
+                "contents": [
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "postback",
+                            "label": "はい",
+                            "data": ok_data,
+                            "displayText": ok_label
+                        },
+                        "style": "primary",
+                        "color": ok_color
+                    },
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "message",
+                            "label": "いいえ",
+                            "text": "操作をやめる"
+                        },
+                        "style": "secondary"
+                    }
+                ],
+                "paddingAll": "20px"
+            }
+        }
+
     async def handle_postback_event(self, event, user: dict):
         """Handle postback events (button clicks)."""
         data = json.loads(event.postback.data)
@@ -158,10 +213,10 @@ class LINEService:
             user["store_pref"] = customer.get("store_pref")
             user["room_pref"] = customer.get("room_pref")
 
-        # --- 共通処理: 日時チェック用関数 ---
-        def is_within_deadline(booking_dt_iso: str) -> bool:
+        # --- 共通処理: 残り時間計算用関数 ---
+        def get_hours_remaining(booking_dt_iso: str) -> float:
             if not booking_dt_iso:
-                return False
+                return 999.0
             try:
                 booking_dt = datetime.fromisoformat(booking_dt_iso)
                 if booking_dt.tzinfo is None:
@@ -169,52 +224,71 @@ class LINEService:
                 
                 now = datetime.now(JST)
                 diff = booking_dt - now
-                # 3時間未満ならTrue (deadline exceeded)
-                return diff.total_seconds() < (settings.BOOKING_DEADLINE_HOURS * 3600)
+                return diff.total_seconds() / 3600.0
             except Exception:
-                return False
+                return 999.0
 
         # --- Action Handlers ---
 
-        if action == "force_cancel_confirm":
-            # 直前キャンセルの最終確認「はい」が押された場合
+        if action == "force_cancel_confirm" or action == "ticket_consume_confirm":
+            # 最終確認「はい」が押された場合
+            # force_cancel_confirm: 3時間未満（直前キャンセル・管理者通知）
+            # ticket_consume_confirm: 12時間未満（1回消化キャンセル）
+            
             booking_id = data.get("booking_id")
             booking_date = data.get("date")
             store_name = data.get("store")
-            old_dt_iso = data.get("dt_iso") # Not strictly needed but kept for consistency
+            old_dt_iso = data.get("dt_iso") 
 
             # Cancel in DB
             success = await db.cancel_booking(booking_id, user_id)
             
             if success:
                 # Notify User
-                await self.reply_text(
-                    reply_token,
-                    f"承知いたしました。\n"
-                    f"直前キャンセルの旨、担当（石原）に通知いたしました。\n"
-                    f"またのご予約をお待ちしております。"
-                )
+                msg_user = ""
+                if action == "force_cancel_confirm":
+                    msg_user = (
+                        f"承知いたしました。\n"
+                        f"直前キャンセルの旨、担当（石原）に通知いたしました。\n"
+                        f"またのご予約をお待ちしております。"
+                    )
+                else:
+                     msg_user = (
+                        f"✅ 予約のキャンセル申請を受け付けました。\n"
+                        f"（規定により1回分消化扱いとなります）\n\n"
+                        f"📅 {booking_date}\n"
+                        f"📍 {store_name}\n\n"
+                        f"またのご予約をお待ちしております！👋"
+                    )
                 
-                # Notify Admin (Special Message)
+                await self.reply_text(reply_token, msg_user)
+                
+                # Notify Admin
                 if settings.ADMIN_USER_ID:
                     display_name = user.get("display_name", "Unknown")
-                    booking_dt_str = "不明"
-                    if old_dt_iso:
-                        try:
-                           dt_obj = datetime.fromisoformat(old_dt_iso)
-                           booking_dt_str = dt_obj.strftime('%m/%d %H:%M')
-                        except: pass
+                    admin_msg = ""
+                    
+                    if action == "force_cancel_confirm":
+                         admin_msg = (
+                            f"🚨 直前キャンセル連絡\n"
+                            f"From: {display_name} 様\n"
+                            f"予約: {booking_date}\n"
+                            f"店舗: {store_name}\n"
+                            f"------------------\n"
+                            f"※{settings.URGENT_CONTACT_DEADLINE_HOURS}時間以内の操作のため、\n"
+                            f"キャンセル扱いとして通知されました。"
+                        )
+                    else:
+                        admin_msg = (
+                            f"🎫 1回消化キャンセル\n"
+                            f"From: {display_name} 様\n"
+                            f"予約: {booking_date}\n"
+                            f"店舗: {store_name}\n"
+                            f"------------------\n"
+                            f"※{settings.BOOKING_DEADLINE_HOURS}時間以内のキャンセルのため、\n"
+                            f"チケット1回分消化扱いとなります。"
+                        )
 
-                    admin_msg = (
-                        f"🚨 直前キャンセル連絡\n"
-                        f"From: {display_name} 様\n"
-                        f"予約: {booking_date}\n"
-                        f"店舗: {store_name}\n"
-                        f"------------------\n"
-                        f"※3時間以内の変更操作のため、\n"
-                        f"キャンセル扱いとして通知されました。\n"
-                        f"必要に応じて連絡を取ってください。"
-                    )
                     try:
                         await self.push_text(settings.ADMIN_USER_ID, admin_msg)
                     except Exception as e:
@@ -230,13 +304,14 @@ class LINEService:
 
         elif action == "cancel_request":
             booking_id = data.get("booking_id")
-            booking_date = data.get("date") # Display text like "2/20 10:00"
+            booking_date = data.get("date") 
             store_name = data.get("store")
-            booking_dt_iso = data.get("dt_iso") # ISO string for logic
+            booking_dt_iso = data.get("dt_iso") 
 
-            # 3時間ルールチェック
-            if is_within_deadline(booking_dt_iso):
-                # 確認ダイアログを出す
+            hours_remain = get_hours_remaining(booking_dt_iso)
+
+            # Case A: 3時間未満 (直前キャンセル)
+            if hours_remain < settings.URGENT_CONTACT_DEADLINE_HOURS:
                 confirm_data = json.dumps({
                     "action": "force_cancel_confirm",
                     "booking_id": booking_id,
@@ -245,86 +320,50 @@ class LINEService:
                     "dt_iso": booking_dt_iso
                 })
                 
-                # Show warning
                 msg = (
-                    f"⚠️ 予約時間の{settings.BOOKING_DEADLINE_HOURS}時間を切っています。\n\n"
+                    f"⚠️ 予約時間の{settings.URGENT_CONTACT_DEADLINE_HOURS}時間を切っています。\n\n"
                     f"これ以降の変更はキャンセル扱いとなります。\n"
                     f"その旨、担当（石原）に通知しますがよろしいでしょうか？"
                 )
                 
-                quick_reply = QuickReply(
-                    items=[
-                        QuickReplyItem(
-                            action=MessageAction(label="はい、連絡する", text="はい")
-                        ),
-                        QuickReplyItem(
-                            action=MessageAction(label="いいえ", text="いいえ")
-                        )
-                    ]
+                flex = self._build_confirm_flex(
+                    "⚠️ 直前キャンセルの確認", 
+                    msg, 
+                    "はい、連絡する", 
+                    confirm_data,
+                    "#cc0000"
                 )
-                
-                # Note: QuickReply action "text" sends a user message. 
-                # To trigger the postback, we need a PostbackAction in the QuickReply or interactive button.
-                # However, QuickReply is easy. Let's use Buttons Template or just ask user to press a Postback Button.
-                # Updating to use Button Template for specific action is better.
-                
-                # Let's use `reply_flex` for a nice confirmation box
-                flex = {
-                    "type": "bubble",
-                    "body": {
-                        "type": "box",
-                        "layout": "vertical",
-                        "contents": [
-                            {
-                                "type": "text",
-                                "text": "⚠️ 直前キャンセルの確認",
-                                "weight": "bold",
-                                "color": "#ff0000",
-                                "size": "md"
-                            },
-                            {
-                                "type": "text",
-                                "text": msg,
-                                "wrap": True,
-                                "size": "sm",
-                                "margin": "md"
-                            }
-                        ],
-                        "paddingAll": "20px"
-                    },
-                    "footer": {
-                        "type": "box",
-                        "layout": "horizontal",
-                        "spacing": "md",
-                        "contents": [
-                            {
-                                "type": "button",
-                                "action": {
-                                    "type": "postback",
-                                    "label": "はい",
-                                    "data": confirm_data,
-                                    "displayText": "はい、連絡してください"
-                                },
-                                "style": "primary",
-                                "color": "#cc0000"
-                            },
-                            {
-                                "type": "button",
-                                "action": {
-                                    "type": "message",
-                                    "label": "いいえ",
-                                    "text": "キャンセルをやめる"
-                                },
-                                "style": "secondary"
-                            }
-                        ],
-                        "paddingAll": "20px"
-                    }
-                }
                 await self.reply_flex(reply_token, "直前キャンセルの確認", flex)
                 return
 
-            # Normal Cancel Flow (Over 3 hours)
+            # Case B: 12時間未満 (チケット消化)
+            elif hours_remain < settings.BOOKING_DEADLINE_HOURS:
+                confirm_data = json.dumps({
+                    "action": "ticket_consume_confirm",
+                    "booking_id": booking_id,
+                    "date": booking_date,
+                    "store": store_name,
+                    "dt_iso": booking_dt_iso
+                })
+                
+                msg = (
+                    f"⚠️ 予約時間の{settings.BOOKING_DEADLINE_HOURS}時間を切っています。\n\n"
+                    f"これ以降のキャンセルは\n"
+                    f"【チケット1回分消化】扱いとなります。\n\n"
+                    f"キャンセルを実行しますか？"
+                )
+
+                flex = self._build_confirm_flex(
+                    "⚠️ チケット消化の確認", 
+                    msg, 
+                    "はい、キャンセルする", 
+                    confirm_data,
+                    "#FF9800" # Orange
+                )
+                await self.reply_flex(reply_token, "チケット消化の確認", flex)
+                return
+
+            # Case C: 12時間以上 (通常キャンセル)
             success = await db.cancel_booking(booking_id, user_id)
             
             if success:
@@ -371,10 +410,10 @@ class LINEService:
             original_dt_iso = data.get("dt") # ISO format
             original_store = data.get("store")
             
-            # 3時間ルールチェック
-            if is_within_deadline(original_dt_iso):
-                # 変更不可ロジックへ誘導（＝直前キャンセル確認）
-                
+            hours_remain = get_hours_remaining(original_dt_iso)
+            
+            # Case A: 3時間未満
+            if hours_remain < settings.URGENT_CONTACT_DEADLINE_HOURS:
                 # Format date for display
                 dt_display = original_dt_iso
                 try:
@@ -382,7 +421,6 @@ class LINEService:
                     dt_display = dt_obj.strftime('%m/%d %H:%M')
                 except: pass
 
-                # 確認ダイアログデータ
                 confirm_data = json.dumps({
                     "action": "force_cancel_confirm",
                     "booking_id": booking_id,
@@ -392,67 +430,58 @@ class LINEService:
                 })
 
                 msg = (
-                    f"⚠️ 予約時間の{settings.BOOKING_DEADLINE_HOURS}時間を切っているため、日時の変更はできません。\n\n"
+                    f"⚠️ 予約時間の{settings.URGENT_CONTACT_DEADLINE_HOURS}時間を切っているため、日時の変更はできません。\n\n"
                     f"このまま手続きを進めると「キャンセル扱い」となります。\n"
                     f"その旨、担当（石原）に通知しますがよろしいでしょうか？"
                 )
-
-                flex = {
-                    "type": "bubble",
-                    "body": {
-                        "type": "box",
-                        "layout": "vertical",
-                        "contents": [
-                            {
-                                "type": "text",
-                                "text": "⚠️ 変更不可・キャンセル確認",
-                                "weight": "bold",
-                                "color": "#ff0000",
-                                "size": "md"
-                            },
-                            {
-                                "type": "text",
-                                "text": msg,
-                                "wrap": True,
-                                "size": "sm",
-                                "margin": "md"
-                            }
-                        ],
-                        "paddingAll": "20px"
-                    },
-                    "footer": {
-                        "type": "box",
-                        "layout": "horizontal",
-                        "spacing": "md",
-                        "contents": [
-                            {
-                                "type": "button",
-                                "action": {
-                                    "type": "postback",
-                                    "label": "はい",
-                                    "data": confirm_data,
-                                    "displayText": "はい、連絡してください（キャンセル）"
-                                },
-                                "style": "primary",
-                                "color": "#cc0000"
-                            },
-                            {
-                                "type": "button",
-                                "action": {
-                                    "type": "message",
-                                    "label": "いいえ",
-                                    "text": "変更をやめる"
-                                },
-                                "style": "secondary"
-                            }
-                        ],
-                        "paddingAll": "20px"
-                    }
-                }
+                
+                flex = self._build_confirm_flex(
+                    "⚠️ 変更不可・キャンセル確認", 
+                    msg, 
+                    "はい、連絡する", 
+                    confirm_data,
+                    "#cc0000"
+                )
                 await self.reply_flex(reply_token, "直前キャンセルの確認", flex)
                 return
 
-            # Normal Change Flow (Over 3 hours)
+            # Case B: 12時間未満 (変更でも1回消化になるのか？ → 変更なら消化しない？それとも変更もキャンセル＆新規？)
+            # 一般的に「変更」はキャンセル料かからないケースが多いですが、
+            # 12時間切ってからの変更を許すと、キャンセル逃れに使われる可能性があります。
+            # ここでは「12時間切ったら変更も不可（キャンセル扱い）」とするのが安全です。
+            
+            elif hours_remain < settings.BOOKING_DEADLINE_HOURS:
+                # Format date for display
+                dt_display = original_dt_iso
+                try:
+                    dt_obj = datetime.fromisoformat(original_dt_iso)
+                    dt_display = dt_obj.strftime('%m/%d %H:%M')
+                except: pass
+
+                confirm_data = json.dumps({
+                    "action": "ticket_consume_confirm",
+                    "booking_id": booking_id,
+                    "date": dt_display,
+                    "store": original_store,
+                    "dt_iso": original_dt_iso
+                })
+
+                msg = (
+                    f"⚠️ 予約時間の{settings.BOOKING_DEADLINE_HOURS}時間を切っているため、予約変更はできません。\n\n"
+                    f"一度キャンセル（1回分消化）してから取り直す形になりますが、よろしいでしょうか？"
+                )
+                
+                flex = self._build_confirm_flex(
+                    "⚠️ 変更不可・チケット消化", 
+                    msg, 
+                    "はい、キャンセルする", 
+                    confirm_data,
+                    "#FF9800"
+                )
+                await self.reply_flex(reply_token, "チケット消化の確認", flex)
+                return
+
+            # Normal Change Flow
             original_dt = data.get("dt")
             
             # Format original date/time for display
