@@ -347,10 +347,11 @@ class LINEService:
                 })
                 
                 msg = (
-                    f"⚠️ 予約時間の{settings.BOOKING_DEADLINE_HOURS}時間を切っています。\n\n"
-                    f"これ以降のキャンセルは\n"
-                    f"【チケット1回分消化】扱いとなります。\n\n"
-                    f"キャンセルを実行しますか？"
+                    f"大変心苦しいのですが、予約時間の{settings.BOOKING_DEADLINE_HOURS}時間を切っておりますため、\n"
+                    f"今回のキャンセルは規定により\n"
+                    f"**【チケット1回分の消化】** となってしまいます🥺\n\n"
+                    f"それでもよろしいでしょうか？\n"
+                    f"（よろしければキャンセル手続きを進めます）"
                 )
 
                 flex = self._build_confirm_flex(
