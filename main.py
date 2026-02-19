@@ -109,10 +109,9 @@ async def webhook_handler(request: Request):
         print(f"📩 Webhook received: {len(events)} event(s)")
 
         for event in events:
-            # Use asyncio.ensure_future instead of BackgroundTasks
-            # BackgroundTasks runs AFTER the response is sent, which can
-            # conflict with Render's free tier spin-down behavior.
-            asyncio.ensure_future(process_event(event))
+            # Cloud Runではレスポンス返却後にCPUが割り当てられなくなるため
+            # awaitして処理完了まで待機する必要があります。
+            await process_event(event)
 
         return JSONResponse(content={"status": "ok"})
 
