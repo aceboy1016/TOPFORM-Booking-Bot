@@ -1291,6 +1291,7 @@ class LINEService:
                 await self.reply_text(
                     reply_token,
                     f"😔 {d_str}（{wd}）は{store_name}の空きがありません。\n\n別の日時を入力してください📅",
+                    quick_reply=QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
                 )
                 await db.set_session(user_id, "booking", "select_date", json.dumps(data))
                 return
