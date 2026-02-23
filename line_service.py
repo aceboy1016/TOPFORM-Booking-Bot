@@ -536,9 +536,11 @@ class LINEService:
                 
                 confirm_text += "\n\n↓↓↓↓↓"
             
+            messages.append(TextMessage(text=confirm_text))
+            
             # 2. Prompt for new store (or same store)
             prompt_text = "変更後の店舗を選んでください！\n（日時だけ変更する場合も、店舗を選んでください）"
-            messages.append(TextMessage(text=prompt_text, quick_reply=quick_reply))
+            messages.append(TextMessage(text=prompt_text, quickReply=quick_reply))
             
             await self.reply_messages(reply_token, messages)
 
@@ -2341,7 +2343,7 @@ class LINEService:
                             "type": "button",
                             "action": {
                                 "type": "postback",
-                                "label": "🔄 変更",
+                                "label": "🔄 該当する日時を変更",
                                 "data": json.dumps({
                                     "action": "select_change_booking",
                                     "booking_id": b["id"],
