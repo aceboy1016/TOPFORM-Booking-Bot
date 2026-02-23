@@ -595,13 +595,14 @@ class LINEService:
                 await self._handle_booking_flow(reply_token, user_id, user, session, text)
                 return
 
-        # ---- Natural language: 「○日空いてる？」----
-        date_match = self._parse_date_query(text)
-        if date_match:
-            await self._handle_date_query(reply_token, user_id, date_match)
+        # ---- 自然言語解析: 「○日空いてる？」----
+        dates = self._parse_multiple_dates(text)
+        if dates:
+            for d in dates:
+                await self._handle_date_query(reply_token, user_id, d)
             return
 
-        # ---- Default response ----
+        # ---- デフォルトレスポンス ----
         await self._handle_default(reply_token)
 
     # ============================================================
