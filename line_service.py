@@ -750,6 +750,7 @@ class LINEService:
                 """日時が正しくありません。
 もう一度入力してください
 (例: 2.20, 明日, 土曜)""",
+                quick_reply=QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
             )
             return
 
@@ -772,6 +773,7 @@ class LINEService:
 
         # ========== BOTH STORES MODE ==========
         if store == "both":
+            data["was_both"] = True
             if len(target_dates) == 1:
                 target_date = target_dates[0]
                 date_str = target_date.strftime("%m/%d")
@@ -816,6 +818,9 @@ class LINEService:
                 if hanzomon_slots:
                     qr_items.append(QuickReplyItem(action=MessageAction(label="半蔵門店", text="半蔵門店")))
 
+                # Add Back button
+                qr_items.append(QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")))
+
                 await self.reply_text(
                     reply_token,
                     "\n\n".join(msg_parts),
@@ -854,7 +859,8 @@ class LINEService:
 
 {final_msg}
 
-ご希望の日時（1日）を指定してください！"""
+ご希望の日時（1日）を指定してください！""",
+                quick_reply=QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
             )
             await db.set_session(user_id, "booking", "select_date", json.dumps(data))
             return
@@ -931,13 +937,16 @@ class LINEService:
 
             # Build quick reply with time slots
             items = []
-            for slot in slots[:13]:
+            for slot in slots[:12]:
                 time_str = slot.strftime("%H:%M")
                 items.append(
                     QuickReplyItem(
                         action=MessageAction(label=f"{time_str}", text=time_str)
                     )
                 )
+            
+            # Add Back button
+            items.append(QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")))
 
             slot_list = "\n".join(
                 [f"🕐 {s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
@@ -1019,7 +1028,8 @@ class LINEService:
 
 {final_msg}
 
-ご希望の日時（1日）を指定してください！"""
+ご希望の日時（1日）を指定してください！""",
+             quick_reply=QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
         )
         # Ensure session is in select_date
         bookings_data = bookings # keep reference if needed
@@ -1111,6 +1121,9 @@ class LINEService:
                 QuickReplyItem(
                     action=MessageAction(label="両店舗", text="両店舗")
                 ),
+                QuickReplyItem(
+                    action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")
+                ),
             ]
         )
 
@@ -1131,6 +1144,47 @@ class LINEService:
         """Handle the booking conversation flow."""
         state = session.get("flow_state", "")
         data = json.loads(session.get("flow_data", "{}"))
+
+        # --- Handle "Back" Button ---
+        if text == "⬅️ 戻る" or text == "戻る":
+            if state == "select_store":
+                # Go back to main exit (Clear session and show welcome)
+                await db.clear_session(user_id)
+                await self.reply_text(reply_token, "予約を中断しました。メニューから新しく選んでください。")
+                return
+            elif state == "select_date":
+                # Back to Store Selection
+                await self._start_booking_flow(reply_token, user_id, user, force_store_select=True)
+                return
+            elif state == "select_store_after_date":
+                # Back to Date Selection
+                await db.set_session(user_id, "booking", "select_date", json.dumps(data))
+                prompt = "希望日時を入力してください\n(例: 2.20, 明日, 土曜)"
+                qr = QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
+                await self.reply_text(reply_token, prompt, quick_reply=qr)
+                return
+            elif state == "select_time":
+                # Back to Date selection OR Store selection after date
+                if data.get("was_both"):
+                    # Transition back to picking store after date
+                    await self._process_select_date(reply_token, user_id, session, data.get("date"), data)
+                else:
+                    await db.set_session(user_id, "booking", "select_date", json.dumps(data))
+                    store_name = STORE_NAMES.get(data.get("store"), data.get("store"))
+                    prompt = f"■ {store_name}\n\n希望日時を入力してください"
+                    qr = QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
+                    await self.reply_text(reply_token, prompt, quick_reply=qr)
+                return
+            elif state == "confirm":
+                # Back to Time selection
+                await db.set_session(user_id, "booking", "select_time", json.dumps(data))
+                await self._process_select_date(reply_token, user_id, session, data.get("date"), data)
+                return
+            elif state == "resolve_room_conflict":
+                 # Back to Time selection
+                await db.set_session(user_id, "booking", "select_time", json.dumps(data))
+                await self._process_select_date(reply_token, user_id, session, data.get("date"), data)
+                return
 
         if state == "select_store":
             store = None
@@ -1160,6 +1214,11 @@ class LINEService:
                             QuickReplyItem(
                                 action=MessageAction(
                                     label="両店舗", text="両店舗"
+                                )
+                            ),
+                            QuickReplyItem(
+                                action=MessageAction(
+                                    label="⬅️ 戻る", text="⬅️ 戻る"
                                 )
                             ),
                         ]
@@ -1200,6 +1259,7 @@ class LINEService:
                         items=[
                             QuickReplyItem(action=MessageAction(label="恵比寿店", text="恵比寿店")),
                             QuickReplyItem(action=MessageAction(label="半蔵門店", text="半蔵門店")),
+                            QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")),
                         ]
                     ),
                 )
@@ -1371,6 +1431,9 @@ class LINEService:
                     items=[
                         QuickReplyItem(
                             action=MessageAction(label="✅ 予約する", text="確定する")
+                        ),
+                        QuickReplyItem(
+                            action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")
                         ),
                         QuickReplyItem(
                             action=MessageAction(label="❌ やめる", text="キャンセル")
