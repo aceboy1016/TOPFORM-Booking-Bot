@@ -697,7 +697,7 @@ class LINEService:
                 found_dates.append(now + timedelta(days=days_ahead))
 
         # 3. M/D pattern
-        for m in re.finditer(r"(\d{1,2})[/月](\d{1,2})", text):
+        for m in re.finditer(r"(\d{1,2})[/月.](\d{1,2})", text):
             try:
                 month = int(m.group(1))
                 day = int(m.group(2))
@@ -749,7 +749,7 @@ class LINEService:
                 reply_token,
                 """日時が正しくありません。
 もう一度入力してください
-(例: 2.20, 明日, 土曜)""",
+(例: 2/20, 明日, 土曜)""",
                 quick_reply=QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
             )
             return
@@ -1159,7 +1159,7 @@ class LINEService:
             elif state == "select_store_after_date":
                 # Back to Date Selection
                 await db.set_session(user_id, "booking", "select_date", json.dumps(data))
-                prompt = "希望日時を入力してください\n(例: 2.20, 明日, 土曜)"
+                prompt = "希望日時を入力してください\n(例: 2/20, 明日, 土曜)"
                 qr = QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
                 await self.reply_text(reply_token, prompt, quick_reply=qr)
                 return
@@ -1234,13 +1234,13 @@ class LINEService:
             if store == "both":
                 await self.reply_text(
                     reply_token,
-                    "■ 両店舗（恵比寿 & 半蔵門）\n\n希望日時を入力してください\n(例: 2.20, 明日, 土曜)\n\n両店舗の空き状況を同時にお見せします！",
+                    "■ 両店舗（恵比寿 & 半蔵門）\n\n希望日時を入力してください\n(例: 2/20, 明日, 土曜)\n\n両店舗の空き状況を同時にお見せします！",
                 )
             else:
                 store_name = STORE_NAMES.get(store, store)
                 await self.reply_text(
                     reply_token,
-                    f"■ {store_name}\n\n希望日時を入力してください\n(例: 2.20, 明日, 土曜)",
+                    f"■ {store_name}\n\n希望日時を入力してください\n(例: 2/21, 明日, 土曜)",
                 )
 
         elif state == "select_store_after_date":
@@ -1274,7 +1274,7 @@ class LINEService:
                 store_name = STORE_NAMES.get(store, store)
                 await self.reply_text(
                     reply_token,
-                    f"■ {store_name}\n\n希望日時を入力してください\n(例: 2.20, 明日, 土曜)",
+                    f"■ {store_name}\n\n希望日時を入力してください\n(例: 2/21, 明日, 土曜)",
                 )
                 return
 
@@ -2135,7 +2135,7 @@ class LINEService:
             "■ 予約確認\n"
             "■ 早見表\n\n"
             "※ 日時を入力すると空き状況も確認できます。\n"
-            "(例:「2.20空いてる？」「明日空き」)",
+            "(例:「2/20空いてる？」「明日空き」)",
             quick_reply=quick_reply,
         )
 
