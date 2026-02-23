@@ -518,6 +518,9 @@ class LINEService:
                     QuickReplyItem(
                         action=MessageAction(label="半蔵門", text="半蔵門")
                     ),
+                    QuickReplyItem(
+                        action=MessageAction(label="両店舗", text="両店舗")
+                    ),
                 ]
             )
             
@@ -767,6 +770,96 @@ class LINEService:
                 data["suggested_dates"] = sug
         # ------------------------
 
+        # ========== BOTH STORES MODE ==========
+        if store == "both":
+            if len(target_dates) == 1:
+                target_date = target_dates[0]
+                date_str = target_date.strftime("%m/%d")
+                wd = WEEKDAY_JP[target_date.weekday()]
+
+                ebisu_slots = get_available_slots(target_date, "ebisu", bookings)
+                hanzomon_slots = get_available_slots(target_date, "hanzoomon", bookings)
+
+                if not ebisu_slots and not hanzomon_slots:
+                    await self.reply_text(
+                        reply_token,
+                        f"😔 {date_str}（{wd}）は両店舗とも空きがありません。\n\n別の日時を入力してください📅",
+                    )
+                    return
+
+                # Build combined display
+                msg_parts = [f"📅 {date_str}（{wd}）の空き状況\n"]
+
+                if ebisu_slots:
+                    e_list = "\n".join([f"  🕐 {s.strftime('%H:%M')}" for s in ebisu_slots])
+                    msg_parts.append(f"🏢 恵比寿店\n{e_list}")
+                else:
+                    msg_parts.append("🏢 恵比寿店: 満席 🈵")
+
+                if hanzomon_slots:
+                    h_list = "\n".join([f"  🕐 {s.strftime('%H:%M')}" for s in hanzomon_slots])
+                    msg_parts.append(f"🏯 半蔵門店\n{h_list}")
+                else:
+                    msg_parts.append("🏯 半蔵門店: 満席 🈵")
+
+                msg_parts.append("どちらの店舗で予約しますか？👇")
+
+                data["date"] = target_date.strftime("%Y-%m-%d")
+                await db.set_session(
+                    user_id, "booking", "select_store_after_date", json.dumps(data)
+                )
+
+                # QuickReply to pick store
+                qr_items = []
+                if ebisu_slots:
+                    qr_items.append(QuickReplyItem(action=MessageAction(label="恵比寿で予約", text="恵比寿で予約")))
+                if hanzomon_slots:
+                    qr_items.append(QuickReplyItem(action=MessageAction(label="半蔵門で予約", text="半蔵門で予約")))
+
+                await self.reply_text(
+                    reply_token,
+                    "\n\n".join(msg_parts),
+                    quick_reply=QuickReply(items=qr_items) if qr_items else None,
+                )
+                return
+
+            # Multiple dates + both stores
+            msg_lines = []
+            for td in target_dates:
+                d_str = td.strftime("%m/%d")
+                wd = WEEKDAY_JP[td.weekday()]
+                e_slots = get_available_slots(td, "ebisu", bookings)
+                h_slots = get_available_slots(td, "hanzoomon", bookings)
+
+                e_count = len(e_slots)
+                h_count = len(h_slots)
+
+                if e_count == 0 and h_count == 0:
+                    msg_lines.append(f"📅 {d_str}（{wd}）: 両店舗満席 🈵")
+                else:
+                    e_info = f"恵比寿{e_count}枠" if e_count > 0 else "恵比寿✕"
+                    h_info = f"半蔵門{h_count}枠" if h_count > 0 else "半蔵門✕"
+                    msg_lines.append(f"📅 {d_str}（{wd}）: {e_info} / {h_info}")
+
+            if not msg_lines:
+                msg_lines.append("ご希望の日程に空きは見つかりませんでした🙇‍♂️")
+
+            final_msg = "\n".join(msg_lines)
+            if len(final_msg) > 1000:
+                final_msg = final_msg[:1000] + "\n..."
+
+            await self.reply_text(
+                reply_token,
+                f"""■ 両店舗の空き状況
+
+{final_msg}
+
+ご希望の日時（1日）を指定してください！"""
+            )
+            await db.set_session(user_id, "booking", "select_date", json.dumps(data))
+            return
+        # ========== END BOTH STORES MODE ==========
+
         # If single date found
         if len(target_dates) == 1:
             target_date = target_dates[0]
@@ -1015,6 +1108,9 @@ class LINEService:
                 QuickReplyItem(
                     action=MessageAction(label="半蔵門", text="半蔵門店")
                 ),
+                QuickReplyItem(
+                    action=MessageAction(label="両店舗", text="両店舗")
+                ),
             ]
         )
 
@@ -1038,7 +1134,9 @@ class LINEService:
 
         if state == "select_store":
             store = None
-            if "恵比寿" in text:
+            if "両店舗" in text:
+                store = "both"
+            elif "恵比寿" in text:
                 store = "ebisu"
             elif "半蔵門" in text:
                 store = "hanzoomon"
@@ -1059,6 +1157,11 @@ class LINEService:
                                     label="半蔵門", text="半蔵門店"
                                 )
                             ),
+                            QuickReplyItem(
+                                action=MessageAction(
+                                    label="両店舗", text="両店舗"
+                                )
+                            ),
                         ]
                     ),
                 )
@@ -1069,10 +1172,94 @@ class LINEService:
                 user_id, "booking", "select_date", json.dumps(data)
             )
 
+            if store == "both":
+                await self.reply_text(
+                    reply_token,
+                    "■ 両店舗（恵比寿 & 半蔵門）\n\n希望日時を入力してください\n(例: 2.20, 明日, 土曜)\n\n両店舗の空き状況を同時にお見せします！",
+                )
+            else:
+                store_name = STORE_NAMES.get(store, store)
+                await self.reply_text(
+                    reply_token,
+                    f"■ {store_name}\n\n希望日時を入力してください\n(例: 2.20, 明日, 土曜)",
+                )
+
+        elif state == "select_store_after_date":
+            # User selected a store after viewing both stores' availability
+            store = None
+            if "恵比寿" in text:
+                store = "ebisu"
+            elif "半蔵門" in text:
+                store = "hanzoomon"
+
+            if not store:
+                await self.reply_text(
+                    reply_token,
+                    "店舗を選んでください👇",
+                    quick_reply=QuickReply(
+                        items=[
+                            QuickReplyItem(action=MessageAction(label="恵比寿で予約", text="恵比寿で予約")),
+                            QuickReplyItem(action=MessageAction(label="半蔵門で予約", text="半蔵門で予約")),
+                        ]
+                    ),
+                )
+                return
+
+            data["store"] = store
+            date_str = data.get("date")
+
+            if not date_str:
+                # Fallback: go to date selection
+                await db.set_session(user_id, "booking", "select_date", json.dumps(data))
+                store_name = STORE_NAMES.get(store, store)
+                await self.reply_text(
+                    reply_token,
+                    f"■ {store_name}\n\n希望日時を入力してください\n(例: 2.20, 明日, 土曜)",
+                )
+                return
+
+            # We have a date already, show time slots for the chosen store
+            target_date = datetime.strptime(date_str, "%Y-%m-%d")
+            bookings = await self._get_bookings()
+            slots = get_available_slots(target_date, store, bookings)
+
+            d_str = target_date.strftime("%m/%d")
+            wd = WEEKDAY_JP[target_date.weekday()]
             store_name = STORE_NAMES.get(store, store)
+
+            if not slots:
+                await self.reply_text(
+                    reply_token,
+                    f"😔 {d_str}（{wd}）は{store_name}の空きがありません。\n\n別の日時を入力してください📅",
+                )
+                await db.set_session(user_id, "booking", "select_date", json.dumps(data))
+                return
+
+            await db.set_session(
+                user_id, "booking", "select_time", json.dumps(data)
+            )
+
+            items = []
+            for slot in slots[:13]:
+                time_str = slot.strftime("%H:%M")
+                items.append(
+                    QuickReplyItem(
+                        action=MessageAction(label=f"{time_str}", text=time_str)
+                    )
+                )
+
+            slot_list = "\n".join(
+                [f"🕐 {s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
+            )
+
             await self.reply_text(
                 reply_token,
-                f"■ {store_name}\n\n希望日時を入力してください\n(例: 2.20, 明日, 土曜)",
+                f"""📅 {d_str}（{wd}） {store_name}
+
+{slot_list}
+
+時間を選択してください👇""",
+                quick_reply=QuickReply(items=items),
             )
 
         elif state == "select_date":
