@@ -812,9 +812,9 @@ class LINEService:
                 # QuickReply to pick store
                 qr_items = []
                 if ebisu_slots:
-                    qr_items.append(QuickReplyItem(action=MessageAction(label="恵比寿で予約", text="恵比寿で予約")))
+                    qr_items.append(QuickReplyItem(action=MessageAction(label="恵比寿店", text="恵比寿店")))
                 if hanzomon_slots:
-                    qr_items.append(QuickReplyItem(action=MessageAction(label="半蔵門で予約", text="半蔵門で予約")))
+                    qr_items.append(QuickReplyItem(action=MessageAction(label="半蔵門店", text="半蔵門店")))
 
                 await self.reply_text(
                     reply_token,
@@ -1198,8 +1198,8 @@ class LINEService:
                     "店舗を選んでください👇",
                     quick_reply=QuickReply(
                         items=[
-                            QuickReplyItem(action=MessageAction(label="恵比寿で予約", text="恵比寿で予約")),
-                            QuickReplyItem(action=MessageAction(label="半蔵門で予約", text="半蔵門で予約")),
+                            QuickReplyItem(action=MessageAction(label="恵比寿店", text="恵比寿店")),
+                            QuickReplyItem(action=MessageAction(label="半蔵門店", text="半蔵門店")),
                         ]
                     ),
                 )
