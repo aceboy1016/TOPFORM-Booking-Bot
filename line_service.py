@@ -202,7 +202,7 @@ class LINEService:
     async def handle_postback_event(self, event, user: dict):
         """Handle postback events (button clicks)."""
         data = json.loads(event.postback.data)
-        action = data.get("action")
+        action = data.get("a") or data.get("action")
         user_id = event.source.user_id
         reply_token = event.reply_token
 
@@ -235,10 +235,10 @@ class LINEService:
             # force_cancel_confirm: 3時間未満（直前キャンセル・管理者通知）
             # ticket_consume_confirm: 12時間未満（1回消化キャンセル）
             
-            booking_id = data.get("booking_id")
+            booking_id = data.get("bid") or data.get("booking_id")
             booking_date = data.get("date")
             store_name = data.get("store")
-            old_dt_iso = data.get("dt_iso") 
+            old_dt_iso = data.get("d") or data.get("dt_iso") or data.get("dt") 
 
             # Cancel in DB
             success = await db.cancel_booking(booking_id, user_id)
@@ -303,11 +303,10 @@ class LINEService:
 
 
         elif action == "cancel_request":
-            booking_id = data.get("booking_id")
+            booking_id = data.get("bid") or data.get("booking_id")
             booking_date = data.get("date") 
             store_name = data.get("store")
-            booking_dt_iso = data.get("dt_iso") 
-
+            booking_dt_iso = data.get("d") or data.get("dt_iso") or data.get("dt")
             hours_remain = get_hours_remaining(booking_dt_iso)
 
             # Case A: 3時間未満 (直前キャンセル)
@@ -401,15 +400,15 @@ class LINEService:
                 
 
         if action == "change_list_more":
-            offset = data.get("offset", 0)
+            offset = data.get("off") or data.get("offset", 0)
             await self._show_booking_change_list(reply_token, user_id, user, offset)
 
-        if action == "select_change_booking":
+        if action == "select_change_booking" or action == "scb":
             # 予約変更ボタンが押されたとき
-            booking_id = data.get("booking_id")
-            b_type = data.get("type")
-            original_dt_iso = data.get("dt") # ISO format
-            original_store = data.get("store")
+            booking_id = data.get("bid") or data.get("booking_id")
+            b_type = data.get("t") or data.get("type")
+            original_dt_iso = data.get("d") or data.get("dt") # ISO format
+            original_store = data.get("store") # May be None in new format
             
             hours_remain = get_hours_remaining(original_dt_iso)
             
@@ -423,11 +422,11 @@ class LINEService:
                 except: pass
 
                 confirm_data = json.dumps({
-                    "action": "force_cancel_confirm",
-                    "booking_id": booking_id,
+                    "a": "force_cancel_confirm",
+                    "bid": booking_id,
                     "date": dt_display,
                     "store": original_store,
-                    "dt_iso": original_dt_iso
+                    "d": original_dt_iso
                 })
 
                 msg = (
@@ -446,11 +445,7 @@ class LINEService:
                 await self.reply_flex(reply_token, "直前キャンセルの確認", flex)
                 return
 
-            # Case B: 12時間未満 (変更でも1回消化になるのか？ → 変更なら消化しない？それとも変更もキャンセル＆新規？)
-            # 一般的に「変更」はキャンセル料かからないケースが多いですが、
-            # 12時間切ってからの変更を許すと、キャンセル逃れに使われる可能性があります。
-            # ここでは「12時間切ったら変更も不可（キャンセル扱い）」とするのが安全です。
-            
+            # Case B: 12時間未満
             elif hours_remain < settings.BOOKING_DEADLINE_HOURS:
                 # Format date for display
                 dt_display = original_dt_iso
@@ -460,11 +455,11 @@ class LINEService:
                 except: pass
 
                 confirm_data = json.dumps({
-                    "action": "ticket_consume_confirm",
-                    "booking_id": booking_id,
+                    "a": "ticket_consume_confirm",
+                    "bid": booking_id,
                     "date": dt_display,
                     "store": original_store,
-                    "dt_iso": original_dt_iso
+                    "d": original_dt_iso
                 })
 
                 msg = (
@@ -483,7 +478,7 @@ class LINEService:
                 return
 
             # Normal Change Flow
-            original_dt = data.get("dt")
+            original_dt = original_dt_iso
             
             # Format original date/time for display
             dt_display = ""
@@ -513,19 +508,19 @@ class LINEService:
             quick_reply = QuickReply(
                 items=[
                     QuickReplyItem(
-                        action=MessageAction(label="恵比寿", text="恵比寿")
+                        action=MessageAction(label="恵比寿", text="恵比寿店")
                     ),
                     QuickReplyItem(
-                        action=MessageAction(label="半蔵門", text="半蔵門")
+                        action=MessageAction(label="半蔵門", text="半蔵門店")
                     ),
                     QuickReplyItem(
                         action=MessageAction(label="両店舗", text="両店舗")
                     ),
+                    QuickReplyItem(
+                        action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")
+                    ),
                 ]
             )
-            
-            # Create messages
-            messages = []
             
             # 1. Confirmation Message
             confirm_text = "承知しました。以下の予約を変更しますね。\n"
@@ -536,13 +531,11 @@ class LINEService:
                 
                 confirm_text += "\n\n↓↓↓↓↓"
             
-            messages.append(TextMessage(text=confirm_text))
-            
             # 2. Prompt for new store (or same store)
             prompt_text = "変更後の店舗を選んでください！\n（日時だけ変更する場合も、店舗を選んでください）"
-            messages.append(TextMessage(text=prompt_text, quickReply=quick_reply))
             
-            await self.reply_messages(reply_token, messages)
+            await self.reply_text(reply_token, confirm_text + "\n" + prompt_text, quick_reply=quick_reply)
+            return
 
     # ============================================================
     # Main message handler
@@ -1838,10 +1831,11 @@ class LINEService:
                                 "type": "postback",
                                 "label": "キャンセル申請",
                                 "data": json.dumps({
-                                    "action": "cancel_request",
-                                    "booking_id": b["id"],
+                                    "a": "cancel_request",
+                                    "bid": b["id"],
                                     "date": f"{date_s} {time_s}",
-                                    "store": store_name
+                                    "store": store_name,
+                                    "d": dt.isoformat()
                                 })
                             },
                             "style": "secondary",
@@ -2345,11 +2339,10 @@ class LINEService:
                                 "type": "postback",
                                 "label": "🔄 該当する日時を変更",
                                 "data": json.dumps({
-                                    "action": "select_change_booking",
-                                    "booking_id": b["id"],
-                                    "type": b["type"],
-                                    "dt": b["dt"].isoformat(),
-                                    "store": b["store"]
+                                    "a": "scb",
+                                    "bid": b["id"],
+                                    "t": b["type"],
+                                    "d": b["dt"].isoformat()
                                 })
                             },
                             "style": "secondary",
@@ -2376,8 +2369,8 @@ class LINEService:
                                 "type": "postback",
                                 "label": "もっと見る...",
                                 "data": json.dumps({
-                                    "action": "change_list_more",
-                                    "offset": end_idx
+                                    "a": "change_list_more",
+                                    "off": end_idx
                                 })
                             },
                             "style": "link",
