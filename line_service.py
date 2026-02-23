@@ -107,10 +107,10 @@ class LINEService:
         quick_reply: Optional[QuickReply] = None,
     ):
         """Send a text reply."""
-        message = TextMessage(text=text, quickReply=quick_reply)
+        message = TextMessage(text=text, quick_reply=quick_reply)
         await self._api.reply_message(
             ReplyMessageRequest(
-                replyToken=reply_token, messages=[message]
+                reply_token=reply_token, messages=[message]
             )
         )
 
@@ -119,17 +119,17 @@ class LINEService:
     ):
         """Send a Flex Message reply."""
         message = FlexMessage(
-            altText=alt_text,
+            alt_text=alt_text,
             contents=FlexContainer.from_dict(flex_content),
         )
         await self._api.reply_message(
-            ReplyMessageRequest(replyToken=reply_token, messages=[message])
+            ReplyMessageRequest(reply_token=reply_token, messages=[message])
         )
 
     async def reply_messages(self, reply_token: str, messages: list):
         """Send multiple messages."""
         await self._api.reply_message(
-            ReplyMessageRequest(replyToken=reply_token, messages=messages)
+            ReplyMessageRequest(reply_token=reply_token, messages=messages)
         )
 
     async def push_text(self, to_user_id: str, text: str):
