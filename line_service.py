@@ -564,6 +564,31 @@ class LINEService:
             print(f"🆔 User ID: {user_id}")
             return
 
+        # 管理者専用コマンド
+        if user_id == settings.ADMIN_USER_ID:
+            if text in ["ユーザー一覧", "顧客一覧", "user_list"]:
+                users = await db.get_all_users()
+                if not users:
+                    await self.reply_text(reply_token, "登録ユーザーはまだいません。")
+                    return
+                
+                lines = [f"👥 登録ユーザー一覧（{len(users)}名）\n"]
+                for i, u in enumerate(users[:20], 1):
+                    name = u.get("display_name", "Unknown")
+                    uid = u.get("line_user_id", "")
+                    created = u.get("created_at", "")[:10]
+                    # 顧客マスタに登録済みかチェック
+                    customer = sheets_service.get_customer_by_line_id(uid)
+                    status = "✅" if customer else "⚠️未登録"
+                    lines.append(f"{i}. {name} {status}\n   {uid}\n   登録日: {created}")
+                
+                if len(users) > 20:
+                    lines.append(f"\n...他 {len(users) - 20}名")
+                
+                lines.append("\n⚠️未登録 = 顧客マスタシートに未追加")
+                await self.reply_text(reply_token, "\n".join(lines))
+                return
+
         if text == "キャンセル" or text == "やめる":
             await db.clear_session(user_id)
             await self.reply_text(reply_token, "操作をキャンセルしました。")
@@ -629,6 +654,21 @@ class LINEService:
             f"以下よりメニューをお選びください。"
         )
         await self.reply_text(event.reply_token, welcome)
+
+        # 管理者に新規友だち追加を通知（LINE User IDを含む）
+        if settings.ADMIN_USER_ID and user_id != settings.ADMIN_USER_ID:
+            try:
+                admin_msg = (
+                    f"👤 新規友だち追加\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"名前: {display_name}\n"
+                    f"LINE ID: {user_id}\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"↑ このIDを顧客マスタシートのB列にコピーしてください"
+                )
+                await self.push_text(settings.ADMIN_USER_ID, admin_msg)
+            except Exception as e:
+                print(f"Admin follow notification failed: {e}")
 
     # ============================================================
     # Date query parsing

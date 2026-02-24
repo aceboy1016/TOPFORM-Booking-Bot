@@ -232,6 +232,16 @@ class Database:
             )
             await db.commit()
 
+    async def get_all_users(self) -> list[dict]:
+        """Get all registered users."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM users ORDER BY created_at DESC"
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
 
 # Singleton instance
 db = Database()
