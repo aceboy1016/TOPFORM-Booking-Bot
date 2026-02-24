@@ -206,6 +206,9 @@ class LINEService:
         user_id = event.source.user_id
         reply_token = event.reply_token
 
+        print(f"DEBUG: handle_postback_event - action: {action}, user_id: {user_id}")
+        print(f"DEBUG: data: {data}")
+
         # Enrich user info from Sheets
         customer = sheets_service.get_customer_by_line_id(user_id)
         if customer:
@@ -408,7 +411,9 @@ class LINEService:
             booking_id = data.get("bid") or data.get("booking_id")
             b_type = data.get("t") or data.get("type")
             original_dt_iso = data.get("d") or data.get("dt") # ISO format
-            original_store = data.get("store") # May be None in new format
+            original_store = data.get("store") or "不明な店舗"
+            
+            print(f"DEBUG: scb - bid: {booking_id}, type: {b_type}, dt: {original_dt_iso}")
             
             hours_remain = get_hours_remaining(original_dt_iso)
             
@@ -2343,7 +2348,8 @@ class LINEService:
                                     "a": "scb",
                                     "bid": b["id"],
                                     "t": b["type"],
-                                    "d": b["dt"].isoformat()
+                                    "d": b["dt"].isoformat(),
+                                    "store": b["store"]
                                 })
                             },
                             "style": "secondary",

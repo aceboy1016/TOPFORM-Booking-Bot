@@ -40,6 +40,10 @@ class Settings:
     # Google Sheets (顧客マスタ)
     GOOGLE_SHEET_ID: str = os.getenv("GOOGLE_SHEET_ID", "17jOb7Jh8xIlsmG9RJjdc0GUKykBVxEVkxpyw92sWkjk")
 
+    # Business rules (also exported as module-level constants below)
+    BOOKING_DEADLINE_HOURS = 12
+    URGENT_CONTACT_DEADLINE_HOURS = 3
+
     @classmethod
     def validate(cls) -> list[str]:
         """Validate required settings and return list of missing ones."""
@@ -68,7 +72,7 @@ CALENDAR_IDS = {
 }
 
 # ============================================================
-# Business rules
+# Business rules (module-level constants for import compatibility)
 # ============================================================
 SESSION_DURATION = 60  # minutes
 TRAVEL_TIME = 60  # minutes (恵比寿⇔半蔵門の移動時間)
@@ -132,3 +136,4 @@ STORE_NAMES = {
     "ebisu": "恵比寿店",
     "hanzoomon": "半蔵門店",
 }
+
