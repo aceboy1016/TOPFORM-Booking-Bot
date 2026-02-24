@@ -53,7 +53,7 @@ class LINEService:
         self._handler: Optional[WebhookHandler] = None
         self._cached_bookings: Optional[BookingData] = None
         self._cache_time: Optional[datetime] = None
-        self._cache_ttl = timedelta(minutes=5)  # 5分キャッシュ
+        self._cache_ttl = timedelta(minutes=1)  # 1分キャッシュ (5分から短縮)
 
     async def initialize(self):
         """Initialize LINE API clients."""
