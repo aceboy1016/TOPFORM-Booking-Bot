@@ -209,12 +209,25 @@ class LINEService:
         print(f"DEBUG: handle_postback_event - action: {action}, user_id: {user_id}")
         print(f"DEBUG: data: {data}")
 
-        # Enrich user info from Sheets
+        # --- Gatekeeper Check (Check if registered in Spreadsheet) ---
         customer = sheets_service.get_customer_by_line_id(user_id)
-        if customer:
-            user["display_name"] = customer["name"]
-            user["store_pref"] = customer.get("store_pref")
-            user["room_pref"] = customer.get("room_pref")
+        is_admin = (user_id == settings.ADMIN_USER_ID)
+        
+        if not customer and not is_admin:
+            pending_msg = (
+                "【登録手続き中です】\n\n"
+                "友だち追加ありがとうございます！\n"
+                "現在、スタッフがシステムへの登録作業を行っております。\n\n"
+                "設定が完了しましたら石原より改めてご連絡いたしますので、それまで少々お待ちくださいませ。🙇‍♂️\n\n"
+                "※ご自身のIDを確認されたい場合は「ID確認」と送信してください。"
+            )
+            await self.reply_text(reply_token, pending_msg)
+            return
+
+        # Enrich user info
+        user["display_name"] = customer["name"]
+        user["store_pref"] = customer.get("store_pref")
+        user["room_pref"] = customer.get("room_pref")
 
         # --- 共通処理: 残り時間計算用関数 ---
         def get_hours_remaining(booking_dt_iso: str) -> float:
@@ -400,6 +413,33 @@ class LINEService:
                     reply_token,
                     "⚠️ すでにキャンセルされているか、予約が見つかりませんでした。"
                 )
+
+        elif action == "activate_user":
+            # Admin only: Notify a user that their registration is complete
+            target_uid = data.get("uid")
+            if user_id != settings.ADMIN_USER_ID:
+                await self.reply_text(reply_token, "⚠️ この操作は許可されていません。")
+                return
+
+            # Welcome Message for the User
+            welcome_msg = (
+                "お待たせいたしました！\n"
+                "予約専用ボットの設定が完了いたしました。✨\n\n"
+                "画面下のメニューから、24時間いつでも以下の操作が可能です。\n\n"
+                "📅 予約早見表: 最新の空き状況を確認\n"
+                "✅ 予約する: 日時を選んで送信するだけ！\n"
+                "📋 予約確認: 次の予定をいつでもチェック\n"
+                "🔄 予約変更: 変更やキャンセルもこちらから\n\n"
+                "※操作後、カレンダーへの反映に1分ほどお時間をいただく場合がございます。\n\n"
+                "もし改善点などがございましたら、お手数ですがこちらの公式LINEへお気軽にご連絡くださいませ。\n"
+                "よろしくお願い申し上げます。🙇‍♂️"
+            )
+
+            try:
+                await self.push_text(target_uid, welcome_msg)
+                await self.reply_text(reply_token, f"✅ 通知を送信しました。")
+            except Exception as e:
+                await self.reply_text(reply_token, f"❌ 送信に失敗しました: {e}")
                 
 
         if action == "change_list_more":
@@ -551,18 +591,35 @@ class LINEService:
         user_id = event.source.user_id
         reply_token = event.reply_token
 
-        # Enrich user info from Sheets
+        if text.lower() in ["id", "id確認", "user_id", "admin_id", "uid"]:
+            await self.reply_text(reply_token, f"あなたのUser ID:\n{user_id}")
+            print(f"🆔 User ID: {user_id}")
+            return
+
+        # --- Gatekeeper Check (Check if registered in Spreadsheet) ---
         customer = sheets_service.get_customer_by_line_id(user_id)
+        is_admin = (user_id == settings.ADMIN_USER_ID)
+
+        if not customer and not is_admin:
+            # Allow common pleasantries but block main features
+            if any(word in text for word in ["予約", "確認", "変更", "早見表"]):
+                pending_msg = (
+                    "【登録手続き中です】\n\n"
+                    "現在、スタッフがシステムへの登録作業を行っております。\n\n"
+                    "設定が完了しましたら石原より改めてご連絡いたしますので、それまで少々お待ちください。🙇‍♂️\n\n"
+                    "※ご自身のIDを確認されたい場合は「ID確認」と送信してください。"
+                )
+                await self.reply_text(reply_token, pending_msg)
+                return
+            
+            # For other text, Gemini might handle it or we can just show a muted response
+            # But during test phase, it's safer to maintain the gatekeeper for everything
+            # except specific ID commands.
+
         if customer:
             user["display_name"] = customer["name"]
             user["store_pref"] = customer.get("store_pref")
             user["room_pref"] = customer.get("room_pref")
-
-        # Priority Commands (Always available)
-        if text.lower() in ["id", "id確認", "user_id", "admin_id"]:
-            await self.reply_text(reply_token, f"あなたのUser ID:\n{user_id}")
-            print(f"🆔 User ID: {user_id}")
-            return
 
         # 管理者専用コマンド
         if user_id == settings.ADMIN_USER_ID:
@@ -572,21 +629,50 @@ class LINEService:
                     await self.reply_text(reply_token, "登録ユーザーはまだいません。")
                     return
                 
-                lines = [f"👥 登録ユーザー一覧（{len(users)}名）\n"]
-                for i, u in enumerate(users[:20], 1):
+                # For admin list, a Flex Message carousel with buttons
+                bubbles = []
+                for u in users[:10]: # Limit for Flex Carousel
                     name = u.get("display_name", "Unknown")
                     uid = u.get("line_user_id", "")
-                    created = u.get("created_at", "")[:10]
-                    # 顧客マスタに登録済みかチェック
                     customer = sheets_service.get_customer_by_line_id(uid)
-                    status = "✅" if customer else "⚠️未登録"
-                    lines.append(f"{i}. {name} {status}\n   {uid}\n   登録日: {created}")
-                
-                if len(users) > 20:
-                    lines.append(f"\n...他 {len(users) - 20}名")
-                
-                lines.append("\n⚠️未登録 = 顧客マスタシートに未追加")
-                await self.reply_text(reply_token, "\n".join(lines))
+                    status = "✅ 登録済" if customer else "⚠️ 未登録"
+                    
+                    bubble = {
+                        "type": "bubble",
+                        "size": "micro",
+                        "body": {
+                            "type": "box",
+                            "layout": "vertical",
+                            "contents": [
+                                {"type": "text", "text": name, "weight": "bold", "size": "sm"},
+                                {"type": "text", "text": status, "size": "xs", "color": "#888888"},
+                                {"type": "text", "text": uid[:12] + "...", "size": "xxs", "margin": "xs"}
+                            ]
+                        },
+                        "footer": {
+                            "type": "box",
+                            "layout": "vertical",
+                            "contents": [
+                                {
+                                    "type": "button",
+                                    "action": {
+                                        "type": "postback",
+                                        "label": "通知を送る",
+                                        "data": json.dumps({"a": "activate_user", "uid": uid}),
+                                        "displayText": f"{name}さんに完了通知を送る"
+                                    },
+                                    "style": "primary",
+                                    "height": "sm",
+                                    "color": "#1DB446" if not customer else "#888888" 
+                                }
+                            ]
+                        }
+                    }
+                    bubbles.append(bubble)
+
+                if bubbles:
+                    flex_data = {"type": "carousel", "contents": bubbles}
+                    await self.reply_flex(reply_token, "ユーザー一覧", flex_data)
                 return
 
         if text == "キャンセル" or text == "やめる":

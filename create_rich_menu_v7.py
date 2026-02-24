@@ -1,0 +1,97 @@
+from PIL import Image, ImageDraw, ImageFont
+import os
+
+# Ultra Premium Config
+WIDTH = 2500
+HEIGHT = 1686
+
+# Color Palette
+BG_COLOR = (248, 249, 250)    # Off-White
+TEXT_COLOR = (28, 28, 30)     # Dark Gray
+ACCENT_COLOR = (52, 199, 89)  # Emerald Green
+ACCENT_BG = (235, 255, 240)   # Light Green tint
+DIVIDER_COLOR = (229, 229, 234)# Divider
+MUTE_TEXT_COLOR = (142, 142, 147) # Gray
+
+def draw_calendar_icon(draw, cx, cy, size=180, color=TEXT_COLOR):
+    w, h = size, size * 0.9
+    x, y = cx - w/2, cy - h/2
+    draw.rounded_rectangle([x, y, x+w, y+h], radius=20, outline=color, width=12)
+    header_h = h * 0.3
+    draw.line([x, y+header_h, x+w, y+header_h], fill=color, width=8)
+
+def draw_refresh_icon(draw, cx, cy, size=160, color=TEXT_COLOR):
+    bbox = [cx - size/2, cy - size/2, cx + size/2, cy + size/2]
+    draw.arc(bbox, start=30, end=330, fill=color, width=12)
+    tip_x, tip_y = cx + size/2 * 0.9, cy - size/2 * 0.3
+    draw.polygon([(tip_x, tip_y), (tip_x - 30, tip_y + 10), (tip_x - 10, tip_y + 35)], fill=color)
+
+def draw_plus_icon(draw, cx, cy, size=180, color=TEXT_COLOR):
+    w = 16
+    draw.line([cx - size/2, cy, cx + size/2, cy], fill=color, width=w)
+    draw.line([cx, cy - size/2, cx, cy + size/2], fill=color, width=w)
+
+def draw_list_icon(draw, cx, cy, size=160, color=TEXT_COLOR):
+    w, h = size * 0.8, size
+    x, y = cx - w/2, cy - h/2
+    draw.rounded_rectangle([x, y, x+w, y+h], radius=15, outline=color, width=12)
+    for i in range(3):
+        ly = y + h * 0.4 + (i * h * 0.2)
+        draw.line([x + 30, ly, x + w - 30, ly], fill=color, width=8)
+
+def create_premium_menu_v7():
+    print("Generating pure python premium image v7 with intuitive labels...")
+    img = Image.new('RGB', (WIDTH, HEIGHT), BG_COLOR)
+    draw = ImageDraw.Draw(img)
+
+    # Background (BL is Highlighted)
+    draw.rectangle([0, HEIGHT//2, WIDTH//2, HEIGHT], fill=ACCENT_BG)
+
+    # Dividers
+    draw.line([(WIDTH//2, 80), (WIDTH//2, HEIGHT-80)], fill=DIVIDER_COLOR, width=3)
+    draw.line([(80, HEIGHT//2), (WIDTH-80, HEIGHT//2)], fill=DIVIDER_COLOR, width=3)
+
+    centers = [(WIDTH*0.25, HEIGHT*0.25), (WIDTH*0.75, HEIGHT*0.25), (WIDTH*0.25, HEIGHT*0.75), (WIDTH*0.75, HEIGHT*0.75)]
+    
+    font_paths = ["/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc", "/System/Library/Fonts/Hiragino Sans GB.ttc", "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"]
+    font, label_font, notice_font = ImageFont.load_default(), ImageFont.load_default(), ImageFont.load_default()
+    for path in font_paths:
+        if os.path.exists(path):
+            font = ImageFont.truetype(path, 110)      # "Book"
+            label_font = ImageFont.truetype(path, 75)   # "Want to do..."
+            notice_font = ImageFont.truetype(path, 40)
+            break
+
+    # Items Config
+    items = [
+        {"action": "空き状況をみる", "title": "早見表", "icon": draw_calendar_icon},
+        {"action": "予定を変更・消す", "title": "予約変更", "icon": draw_refresh_icon},
+        {"action": "新しく予約したい", "title": "予約する", "icon": draw_plus_icon, "accent": True},
+        {"action": "予約内容をみる", "title": "予約確認", "icon": draw_list_icon}
+    ]
+
+    for i, item in enumerate(items):
+        cx, cy = centers[i]
+        
+        # Action Label (Top)
+        draw.text((cx, cy - 260), item["action"], font=label_font, fill=MUTE_TEXT_COLOR, anchor="mm")
+        
+        # Draw Icon (Center)
+        icon_y = cy - 20
+        if item.get("accent"):
+            draw.ellipse([cx - 160, icon_y - 160, cx + 160, icon_y + 160], fill=ACCENT_COLOR)
+            item["icon"](draw, cx, icon_y, size=150, color=(255, 255, 255))
+        else:
+            item["icon"](draw, cx, icon_y, size=180, color=TEXT_COLOR)
+        
+        # Main Title (Bottom)
+        draw.text((cx, cy + 240), item["title"], font=font, fill=TEXT_COLOR, anchor="mm")
+
+    # Bottom Notice
+    draw.text((WIDTH // 2, HEIGHT - 50), "※カレンダーの反映に1分ほどかかる場合があります", font=notice_font, fill=MUTE_TEXT_COLOR, anchor="mm")
+
+    img.save("rich_menu_v7.jpg", "JPEG", quality=95)
+    print("Created rich_menu_v7.jpg")
+
+if __name__ == "__main__":
+    create_premium_menu_v7()
