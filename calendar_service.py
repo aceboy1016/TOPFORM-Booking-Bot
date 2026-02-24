@@ -688,9 +688,12 @@ def find_user_bookings(
     Searches across all store calendars.
     """
     matches = []
-    all_store_bookings = all_bookings.ebisu + all_bookings.hanzoomon
-
-    for b in all_store_bookings:
+    # 「石原仕事用」カレンダーの予約のみを検索対象にする
+    # (店舗カレンダーやプライベートカレンダーからは検索しない)
+    for b in all_bookings.ishihara:
+        if b.source != "work": # プライベート予定は除外
+            continue
+            
         title = b.title or ""
         if user_name in title:
             matches.append(b)
