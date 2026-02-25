@@ -224,10 +224,11 @@ class LINEService:
             await self.reply_text(reply_token, pending_msg)
             return
 
-        # Enrich user info
-        user["display_name"] = customer["name"]
-        user["store_pref"] = customer.get("store_pref")
-        user["room_pref"] = customer.get("room_pref")
+        # Enrich user info (only if customer exists in spreadsheet)
+        if customer:
+            user["display_name"] = customer["name"]
+            user["store_pref"] = customer.get("store_pref")
+            user["room_pref"] = customer.get("room_pref")
 
         # --- 共通処理: 残り時間計算用関数 ---
         def get_hours_remaining(booking_dt_iso: str) -> float:
