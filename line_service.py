@@ -697,6 +697,13 @@ class LINEService:
             await self._show_booking_change_list(reply_token, user_id, user)
             return
 
+        # ---- 早見表フォーマットの一括予約 ----
+        # Pattern: 2026/04/01(水) 10:30〜11:30 @恵比寿
+        bulk_entries = self._parse_hayamihyo_bulk(text)
+        if bulk_entries:
+            await self._handle_bulk_booking(reply_token, user_id, user, bulk_entries)
+            return
+
         if "予約" in text or "booking" in text.lower():
             force_select = "店舗変更" in text or "変更" in text
             await self._start_booking_flow(reply_token, user_id, user, force_store_select=force_select)
@@ -2521,6 +2528,140 @@ class LINEService:
         }
         
         await self.reply_flex(reply_token, "予約変更：予約を選択", carousel)
+
+    # ============================================================
+    # 早見表一括予約パーサー＆ハンドラー
+    # ============================================================
+    def _parse_hayamihyo_bulk(self, text: str) -> list[dict]:
+        """
+        Parse bulk booking text from 早見表 format.
+        
+        Supported formats:
+          ・2026/04/01(水) 10:30〜11:30 @恵比寿
+          ・2026/04/05(日) 09:00〜10:00 @恵比寿店
+          - 04/01(水) 10:30~11:30 @半蔵門
+          2026/04/01 10:30-11:30 恵比寿
+        
+        Returns a list of dicts with keys: date_str, time_str, store, display
+        """
+        entries = []
+        
+        # Pattern: optional YYYY/ then MM/DD optional (曜) then HH:MM then 〜/~/- then HH:MM then optional @ then store
+        pattern = re.compile(
+            r'(\d{4}/)?(\d{1,2}/\d{1,2})'       # date (optional year + MM/DD)
+            r'\s*(?:\([月火水木金土日]\)\s*)?'      # optional (曜)
+            r'(\d{1,2}:\d{2})'                    # start time HH:MM
+            r'\s*[〜~\-～]\s*'                      # separator 
+            r'(\d{1,2}:\d{2})'                    # end time HH:MM
+            r'\s*@?\s*(恵比寿|半蔵門|ebisu|hanzoomon|hanzomon)?', # optional store
+            re.MULTILINE
+        )
+        
+        for m in pattern.finditer(text):
+            year_part = m.group(1)  # "2026/" or None
+            md_part = m.group(2)    # "04/01"
+            start_time = m.group(3) # "10:30"
+            end_time = m.group(4)   # "11:30"
+            store_raw = m.group(5)  # "恵比寿" or None
+            
+            # Determine year
+            now = datetime.now(JST)
+            if year_part:
+                year = int(year_part.rstrip('/'))
+            else:
+                year = now.year
+            
+            # Parse date
+            try:
+                month, day = map(int, md_part.split('/'))
+                target_date = datetime(year, month, day)
+            except (ValueError, TypeError):
+                continue
+                
+            date_str = target_date.strftime("%Y-%m-%d")
+            
+            # Determine store
+            store = "ebisu"  # default
+            if store_raw:
+                if "半蔵門" in store_raw or "hanzomon" in store_raw.lower():
+                    store = "hanzoomon"
+                else:
+                    store = "ebisu"
+            
+            # Format for display
+            wd = WEEKDAY_JP[target_date.weekday()]
+            store_display = STORE_NAMES.get(store, store)
+            display = f"{month:02d}/{day:02d}（{wd}）{start_time}〜{end_time} @{store_display}"
+            
+            entries.append({
+                "date_str": date_str,
+                "time_str": start_time,
+                "end_time": end_time,
+                "store": store,
+                "display": display,
+            })
+        
+        return entries
+
+    async def _handle_bulk_booking(self, reply_token: str, user_id: str, user: dict, entries: list[dict]):
+        """
+        Handle bulk booking requests from 早見表 format.
+        Creates provisional bookings for each entry and notifies admin.
+        """
+        results = []
+        booking_ids = []
+        
+        for entry in entries:
+            date_str = entry["date_str"]
+            time_str = entry["time_str"]
+            store = entry["store"]
+            display = entry["display"]
+            
+            # Build ISO datetime
+            slot_datetime = f"{date_str}T{time_str}:00+09:00"
+            
+            # Save as provisional booking
+            try:
+                room_pref = user.get("room_pref")
+                metadata = {"room": room_pref} if room_pref else None
+                booking_id = await db.save_booking(
+                    user_id, store, slot_datetime, "provisional", metadata
+                )
+                results.append(f"✅ {display}（No.{booking_id}）")
+                booking_ids.append(booking_id)
+            except Exception as e:
+                print(f"Bulk booking error: {e}")
+                results.append(f"❌ {display}（エラー）")
+        
+        self._invalidate_cache()
+        
+        # Build user response message
+        results_text = "\n".join(results)
+        display_name = user.get("display_name", "ゲスト")
+        
+        user_msg = (
+            f"📋 仮予約を一括で受け付けました！\n\n"
+            f"{results_text}\n\n"
+            f"※ まだ予約は確定ではありません。\n"
+            f"スタッフが確認後、確定のご連絡をいたします📩"
+        )
+        
+        await self.reply_text(reply_token, user_msg)
+        
+        # Notify Admin
+        if settings.ADMIN_USER_ID:
+            admin_msg = (
+                f"🆕 一括予約リクエスト\n"
+                f"👤 {display_name}\n\n"
+                f"↓↓↓↓↓\n\n"
+                f"▼ 予約内容（{len(booking_ids)}件）\n"
+                f"{results_text}\n\n"
+                f"⚠️ hacomono/カレンダーに登録してください！"
+            )
+            try:
+                await self.push_text(settings.ADMIN_USER_ID, admin_msg)
+            except Exception as e:
+                print(f"Admin bulk notification failed: {e}")
 
 
 # Singleton instance
