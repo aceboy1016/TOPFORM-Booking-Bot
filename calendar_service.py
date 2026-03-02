@@ -218,7 +218,49 @@ class CalendarService:
             ishihara=ishihara_bookings,
             last_update=datetime.now(JST).isoformat()
         )
-    
+
+    def fetch_user_past_bookings_this_month(self, user_name: str) -> list:
+        """
+        今月1日〜昨日までの、指定ユーザーの予約をカレンダーから取得する。
+        今月の利用回数カウント用。
+        Returns a list of Booking objects.
+        """
+        if not self._service:
+            self.initialize()
+
+        now = datetime.now(JST)
+        # 今月1日の0時
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # 今日の0時（過去分のみ）
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # 今日が月初なら過去分は0件
+        if month_start >= today_start:
+            return []
+
+        time_min = month_start.isoformat()
+        time_max = today_start.isoformat()
+
+        work_events = self._fetch_events(CALENDAR_IDS["ishihara_work"], time_min, time_max)
+
+        matches = []
+        for ev in work_events:
+            title = ev.get("summary", "")
+            if user_name not in title:
+                continue
+            store = "unknown"
+            if "(半)" in title or "（半）" in title:
+                store = "hanzoomon"
+            elif "(恵)" in title or "（恵）" in title:
+                store = "ebisu"
+            b = self._transform_event(ev, store, "work")
+            if b:
+                matches.append(b)
+
+        matches.sort(key=lambda b: b.start_dt)
+        return matches
+
+
     # ... create_calendar_event ...
 
 # ...

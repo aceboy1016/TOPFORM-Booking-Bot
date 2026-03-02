@@ -2282,34 +2282,57 @@ class LINEService:
     async def _show_user_bookings_simple(
         self, reply_token: str, user_id: str, user: dict
     ):
-        """Show the user's upcoming bookings in a simple text list."""
-        # Get from local DB (Provisional/Confirmed)
-        upcoming = await db.get_user_bookings(user_id, include_past=False)
-        
-        # Calendar bookings (Legacy/Manual)
+        """Show the user's upcoming bookings with monthly usage count."""
+        now = datetime.now(JST)
+
+        # ── 1. 今月の過去利用回数をカレンダーから取得 ──────────────────
         display_name = user.get("display_name", "")
+        past_count_this_month = 0
+
+        if display_name and display_name != "Unknown":
+            try:
+                past_cal = calendar_service.fetch_user_past_bookings_this_month(display_name)
+                past_count_this_month = len(past_cal)
+            except Exception as e:
+                print(f"月次集計エラー: {e}")
+
+        # 今日の分（DB: confirmed当日分）も今月カウントに含める
+        all_db = await db.get_user_bookings(user_id, include_past=True)
+        today_start = JST.localize(now.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None))
+
+        # 今日の0時〜今の時刻の間に終わった予約（DB）を今月済みにカウント
+        db_past_today = [
+            b for b in all_db
+            if today_start <= datetime.fromisoformat(b["slot_datetime"]) <= now
+            and b.get("status") != "cancelled"
+        ]
+        past_count_this_month += len(db_past_today)
+
+        # ── 2. これからの予約（DB + カレンダー）を取得 ──────────────────
+        upcoming = await db.get_user_bookings(user_id, include_past=False)
+
         cal_bookings = []
         if display_name and display_name != "Unknown":
             bookings = await self._get_bookings()
             cal_bookings = find_user_bookings(display_name, bookings)
-            # Filter future only
-            now = datetime.now(JST)
             cal_bookings = [b for b in cal_bookings if b.start_dt > now]
 
         if not upcoming and not cal_bookings:
+            # 予約なし、でも今月の利用回数は表示
+            usage_line = ""
+            if past_count_this_month > 0:
+                usage_line = f"📊 今月の利用: {past_count_this_month}回\n\n"
             await self.reply_text(
                 reply_token,
-                "📖 現在の予約はありません。\n\n「予約する」で新しい予約を入れましょう！📅",
+                f"{usage_line}📖 現在の予約はありません。\n\n「予約する」で新しい予約を入れましょう！📅",
             )
             return
 
-        # Build text list
-        msg_lines = ["📖 予約一覧\n"]
-        
-        # Merge and sort all bookings
+        # ── 3. 今月の今後の予約も集計してカウントアップ ───────────────
+        # 今月内の予約にだけ「今月○回目」を付ける
         all_display_bookings = []
-        
-        # 1. DB Bookings
+
+        # DB分
         for b in upcoming:
             dt = datetime.fromisoformat(b["slot_datetime"])
             metadata = b.get("metadata", {})
@@ -2317,39 +2340,64 @@ class LINEService:
             store_name = STORE_NAMES.get(b["store"], b["store"])
             if room:
                 store_name += f"（個室{room}）"
-            
             status_mark = "【仮】" if b.get("status") == "provisional" else ""
             all_display_bookings.append({
                 "dt": dt,
-                "text": f"📅 {dt.strftime('%m/%d')}（{WEEKDAY_JP[dt.weekday()]}）{dt.strftime('%H:%M')} | {store_name}{status_mark}"
+                "store": store_name,
+                "mark": status_mark,
             })
 
-        # 2. Calendar Bookings
+        # カレンダー分
         for b in cal_bookings:
             dt = b.start_dt
             store_name = STORE_NAMES.get(b.store, "")
             if b.room:
                 store_name += f"（個室{b.room}）"
-            
             all_display_bookings.append({
                 "dt": dt,
-                "text": f"📅 {dt.strftime('%m/%d')}（{WEEKDAY_JP[dt.weekday()]}）{dt.strftime('%H:%M')} | {store_name}"
+                "store": store_name,
+                "mark": "",
             })
 
-        # Sort by date
+        # 日付順ソート
         all_display_bookings.sort(key=lambda x: x["dt"])
 
-        # Limit to prevent message too long
+        # ── 4. 今月分に「今月○回目」を付与 ─────────────────────────────
+        this_month_year = (now.year, now.month)
+        counter = past_count_this_month  # 過去分から引き継ぎ
+
+        msg_lines = ["📖 予約一覧\n"]
+
+        # 今月の利用サマリー行
+        future_this_month = [
+            b for b in all_display_bookings
+            if (b["dt"].year, b["dt"].month) == this_month_year
+        ]
+        total_this_month = past_count_this_month + len(future_this_month)
+
+        if total_this_month > 0 or past_count_this_month > 0:
+            msg_lines.append(f"📊 今月の利用: {past_count_this_month}回 / 予定: {total_this_month}回\n")
+
         display_limit = 15
         for item in all_display_bookings[:display_limit]:
-            msg_lines.append(item["text"])
-        
+            dt = item["dt"]
+            wd = WEEKDAY_JP[dt.weekday()]
+            line = f"📅 {dt.strftime('%m/%d')}（{wd}）{dt.strftime('%H:%M')} | {item['store']}{item['mark']}"
+
+            # 今月の予約には「今月○回目」を付与
+            if (dt.year, dt.month) == this_month_year:
+                counter += 1
+                line += f"  ← 今月{counter}回目"
+
+            msg_lines.append(line)
+
         if len(all_display_bookings) > display_limit:
             msg_lines.append(f"\n...他 {len(all_display_bookings) - display_limit}件")
 
         msg_lines.append("\n変更する場合は「予約変更」と入力してください🔄")
 
         await self.reply_text(reply_token, "\n".join(msg_lines))
+
 
     # ============================================================
     # Show booking list for modification (Carousel with Pagination)
