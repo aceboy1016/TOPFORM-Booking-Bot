@@ -21,8 +21,8 @@ class SheetsService:
         self._sheet_id = settings.GOOGLE_SHEET_ID
         self._cached_data = None
         self._last_fetch = None
-        # Cache duration: 5 minutes
-        self._cache_ttl = 300
+        # Cache duration: 1 minute (짧くしてリアルタイム性を向上)
+        self._cache_ttl = 60
 
     def initialize(self):
         """Initialize the Google Sheets API client."""
@@ -147,7 +147,17 @@ class SheetsService:
         for c in customers:
             if c["line_id"] == line_id:
                 return c
+        # Not found in cache — try a force refresh once before giving up
+        customers = self.fetch_customer_master(force_refresh=True)
+        for c in customers:
+            if c["line_id"] == line_id:
+                return c
         return None
+
+    def force_refresh(self) -> int:
+        """Force refresh the cache and return number of customers loaded."""
+        customers = self.fetch_customer_master(force_refresh=True)
+        return len(customers)
 
 # Singleton instance
 sheets_service = SheetsService()

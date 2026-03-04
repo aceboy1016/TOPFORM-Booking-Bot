@@ -676,6 +676,14 @@ class LINEService:
                     await self.reply_flex(reply_token, "ユーザー一覧", flex_data)
                 return
 
+            if text in ["キャッシュ更新", "更新", "reload", "refresh"]:
+                count = sheets_service.force_refresh()
+                await self.reply_text(
+                    reply_token,
+                    f"✅ 顧客マスタを再読み込みしました。\n登録済み顧客数: {count}名"
+                )
+                return
+
         if text == "キャンセル" or text == "やめる":
             await db.clear_session(user_id)
             await self.reply_text(reply_token, "操作をキャンセルしました。")
