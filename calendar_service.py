@@ -173,7 +173,8 @@ class CalendarService:
     def fetch_all_bookings(self) -> BookingData:
         """Fetch all bookings from all calendars."""
         if not self._service:
-            self.initialize()
+            # Assumed caller awaited initialize() already.
+            pass
 
         now = datetime.now(JST)
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -226,7 +227,10 @@ class CalendarService:
         Returns a list of Booking objects.
         """
         if not self._service:
-            self.initialize()
+            # Note: We must run initialize manually if needed in async context, 
+            # but since fetch_user_past_bookings is sync, we assume caller did it.
+            # Alternatively use a sync wrapper or initialization flag.
+            pass
 
         now = datetime.now(JST)
         # 今月1日の0時
@@ -244,9 +248,11 @@ class CalendarService:
         work_events = self._fetch_events(CALENDAR_IDS["ishihara_work"], time_min, time_max)
 
         matches = []
+        normalized_user_name = user_name.replace(" ", "").replace("　", "")
+        
         for ev in work_events:
             title = ev.get("summary", "")
-            if user_name not in title:
+            if normalized_user_name not in title.replace(" ", "").replace("　", ""):
                 continue
             store = "unknown"
             if "(半)" in title or "（半）" in title:
