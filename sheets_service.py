@@ -107,13 +107,21 @@ class SheetsService:
                 hanzomon_flag = row[3].strip() if len(row) > 3 else ""
                 room_raw = row[4].strip() if len(row) > 4 else ""
                 
+                circle_marks = ["◯", "○", "〇", "🟢"]
+                cross_marks = ["✖️", "✖", "×", "❌"]
+                
+                ebisu_ok = any(mark in ebisu_flag for mark in circle_marks)
+                ebisu_ng = any(mark in ebisu_flag for mark in cross_marks)
+                hanzomon_ok = any(mark in hanzomon_flag for mark in circle_marks)
+                hanzomon_ng = any(mark in hanzomon_flag for mark in cross_marks)
+                
                 # Determine store preference
                 store_pref = None
-                if "◯" in ebisu_flag and "✖️" in hanzomon_flag:
+                if ebisu_ok and (hanzomon_ng or not hanzomon_ok):
                     store_pref = "ebisu"
-                elif "✖️" in ebisu_flag and "◯" in hanzomon_flag:
+                elif hanzomon_ok and (ebisu_ng or not ebisu_ok):
                     store_pref = "hanzoomon"
-                # If both are ◯, store_pref remains None (let user choose)
+                # If both are OK, store_pref remains None (let user choose)
 
                 # Determine room preference for Ebisu
                 room_pref = None

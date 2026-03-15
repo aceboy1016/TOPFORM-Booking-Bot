@@ -1217,10 +1217,9 @@ class LINEService:
         # Pre-fill data with user preferences
         initial_data = {}
         store_pref = user.get("store_pref")
-        
         # Check if we can skip store selection
         if store_pref and not force_store_select:
-             store_code = "ebisu" if "恵比寿" in store_pref else "hanzomon"
+             store_code = "ebisu" if "ebisu" in store_pref else "hanzomon"
              initial_data["store"] = store_code
              if user.get("room_pref"):
                  initial_data["room_pref"] = user.get("room_pref")
