@@ -734,6 +734,12 @@ class LINEService:
                 await self._handle_date_query(reply_token, user_id, d)
             return
 
+        # ---- 挨拶・労いへの返信 ----
+        pleasantries = ["お疲れ", "おつかれ", "こんにちは", "おはよう", "ありがとう", "宜しく", "よろしく"]
+        if any(p in text for p in pleasantries) and len(text) < 15:
+            await self.reply_text(reply_token, f"{user.get('display_name', 'お客様')}さん、お疲れ様です！💪\n何かお手伝いできることはありますでしょうか？\n(例:「明日空いてる？」など)")
+            return
+
         # ---- デフォルトレスポンス ----
         await self._handle_default(reply_token)
 
