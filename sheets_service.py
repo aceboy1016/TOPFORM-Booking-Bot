@@ -21,7 +21,6 @@ class SheetsService:
         self._sheet_id = settings.GOOGLE_SHEET_ID
         self._cached_data = None
         self._last_fetch = None
-        # Cache duration: 1 minute (짧くしてリアルタイム性を向上)
         self._cache_ttl = 60
 
     def initialize(self):
@@ -43,7 +42,7 @@ class SheetsService:
             creds_data = json.loads(creds_json)
             credentials = service_account.Credentials.from_service_account_info(
                 creds_data,
-                scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+                scopes=["https://www.googleapis.com/auth/spreadsheets"],
             )
             self._service = build("sheets", "v4", credentials=credentials)
             print("✅ Google Sheets Service initialized")
@@ -51,22 +50,12 @@ class SheetsService:
             print(f"❌ Failed to initialize Sheets Service: {e}")
 
     def fetch_customer_master(self, force_refresh: bool = False) -> List[Dict]:
-        """
-        Fetch customer master data from spreadsheet.
-        Returns a list of dicts:
-        {
-            "name": "石原 順二",
-            "line_id": "U123...",
-            "store_pref": "ebisu" | "hanzoomon",
-            "room_pref": "A" | "B" | None
-        }
-        """
+        """Fetch customer master data from spreadsheet."""
         if not self._service:
             self.initialize()
             if not self._service:
                 return []
 
-        # Check cache
         now = datetime.now()
         if (
             not force_refresh
@@ -77,10 +66,7 @@ class SheetsService:
             return self._cached_data
 
         try:
-            # Assume data is in the first sheet, from A2 to E (skip header)
-            # Adjust range as needed based on actual sheet structure
             sheet_range = "A2:E"
-            
             result = (
                 self._service.spreadsheets()
                 .values()
@@ -91,15 +77,7 @@ class SheetsService:
             
             customers = []
             for row in rows:
-                if len(row) < 2:  # Must have Name and LINE ID at least
-                    continue
-                
-                # Column mapping based on actual sheet structure:
-                # A (0): 顧客名
-                # B (1): LINE ID
-                # C (2): 恵比寿 (◯/✖️)
-                # D (3): 半蔵門 (◯/✖️)
-                # E (4): 優先スタジオ (A/B)
+                if len(row) < 2: continue
                 
                 name = row[0].strip()
                 line_id = row[1].strip()
@@ -111,52 +89,33 @@ class SheetsService:
                 cross_marks = ["✖️", "✖", "×", "❌"]
                 
                 ebisu_ok = any(mark in ebisu_flag for mark in circle_marks)
-                ebisu_ng = any(mark in ebisu_flag for mark in cross_marks)
                 hanzomon_ok = any(mark in hanzomon_flag for mark in circle_marks)
-                hanzomon_ng = any(mark in hanzomon_flag for mark in cross_marks)
                 
-                # Determine store preference
                 store_pref = None
-                if ebisu_ok and (hanzomon_ng or not hanzomon_ok):
-                    store_pref = "ebisu"
-                elif hanzomon_ok and (ebisu_ng or not ebisu_ok):
-                    store_pref = "hanzoomon"
-                # If both are OK, store_pref remains None (let user choose)
+                if ebisu_ok and not hanzomon_ok: store_pref = "ebisu"
+                elif hanzomon_ok and not ebisu_ok: store_pref = "hanzoomon"
 
-                # Determine room preference for Ebisu
-                room_pref = None
-                if "A" in room_raw:
-                    room_pref = "A"
-                elif "B" in room_raw:
-                    room_pref = "B"
+                room_pref = "A" if "A" in room_raw else "B" if "B" in room_raw else None
                 
                 customers.append({
                     "name": name,
                     "line_id": line_id,
                     "store_pref": store_pref,
                     "room_pref": room_pref,
-                    "ebisu_ok": "◯" in ebisu_flag,
-                    "hanzomon_ok": "◯" in hanzomon_flag
+                    "ebisu_ok": ebisu_ok,
+                    "hanzomon_ok": hanzomon_ok
                 })
             
-            print(f"✅ Fetched {len(customers)} customers from sheet")
             self._cached_data = customers
             self._last_fetch = now
             return customers
-
         except Exception as e:
             print(f"❌ Failed to fetch customer master: {e}")
-            # Return empty list or previous cache if available
             return self._cached_data or []
 
     def get_customer_by_line_id(self, line_id: str) -> Optional[Dict]:
         """Get customer info by LINE ID."""
         customers = self.fetch_customer_master()
-        for c in customers:
-            if c["line_id"] == line_id:
-                return c
-        # Not found in cache — try a force refresh once before giving up
-        customers = self.fetch_customer_master(force_refresh=True)
         for c in customers:
             if c["line_id"] == line_id:
                 return c
@@ -166,6 +125,53 @@ class SheetsService:
         """Force refresh the cache and return number of customers loaded."""
         customers = self.fetch_customer_master(force_refresh=True)
         return len(customers)
+
+    def fetch_waitlist(self) -> List[Dict]:
+        """キャンセル待ちリストを取得する。"""
+        if not self._service:
+            self.initialize()
+            if not self._service: return []
+
+        try:
+            sheet_range = "キャンセル待ち!A2:G"
+            result = (
+                self._service.spreadsheets().values().get(spreadsheetId=self._sheet_id, range=sheet_range).execute()
+            )
+            rows = result.get("values", [])
+            
+            waitlist = []
+            for i, row in enumerate(rows):
+                row_idx = i + 2
+                row_data = row + [""] * (7 - len(row))
+                status = row_data[6].strip()
+                if status == "待機中":
+                    waitlist.append({
+                        "row_index": row_idx,
+                        "registered_at": row_data[0],
+                        "date": row_data[1],
+                        "time": row_data[2],
+                        "store": row_data[3],
+                        "name": row_data[4],
+                        "line_id": row_data[5],
+                        "status": status
+                    })
+            return waitlist
+        except Exception as e:
+            print(f"❌ Failed to fetch waitlist: {e}")
+            return []
+
+    def update_waitlist_status(self, row_index: int, status: str):
+        """キャンセル待ちのステータスを更新する。"""
+        if not self._service: return
+        try:
+            cell_range = f"キャンセル待ち!G{row_index}"
+            body = {"values": [[status]]}
+            self._service.spreadsheets().values().update(
+                spreadsheetId=self._sheet_id, range=cell_range,
+                valueInputOption="USER_ENTERED", body=body
+            ).execute()
+        except Exception as e:
+            print(f"❌ Failed to update waitlist status: {e}")
 
 # Singleton instance
 sheets_service = SheetsService()

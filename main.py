@@ -200,6 +200,173 @@ async def get_user_bookings(line_user_id: str):
     return {"bookings": bookings}
 
 
+@app.get("/api/check-waitlist")
+async def trigger_check_waitlist():
+    """Check waitlist and notify users if there are available slots."""
+    from sheets_service import sheets_service
+    from calendar_service import calendar_service, check_availability
+    from line_service import line_service
+    from datetime import datetime
+    import pytz
+    
+    # Ensure services are initialized
+    await line_service.initialize()
+    
+    JST = pytz.timezone("Asia/Tokyo")
+    waitlist = sheets_service.fetch_waitlist()
+    if not waitlist:
+        return {"status": "success", "message": "No waitlist entries"}
+
+    bookings = calendar_service.fetch_all_bookings()
+    notified_count = 0
+    results = []
+
+    for entry in waitlist:
+        if entry["status"] != "待機中":
+            continue
+            
+        date_str = entry["date"]
+        time_str = entry["time"]
+        store_entry = entry["store"]
+        stores_to_check = []
+        if "恵比寿" in store_entry or "または" in store_entry or "どちら" in store_entry:
+            stores_to_check.append("ebisu")
+        if "半蔵門" in store_entry or "または" in store_entry or "どちら" in store_entry:
+            stores_to_check.append("hanzoomon")
+        if not stores_to_check:
+            stores_to_check = ["ebisu"]
+        
+        try:
+            target_date = JST.localize(datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M"))
+        except Exception as e:
+            print(f"Date parsing error: {e}")
+            continue
+                
+        # Check availability
+        is_available = False
+        available_store_name = store_entry
+        for sc in stores_to_check:
+            status = check_availability(target_date, sc, bookings)
+            if status.get("is_available"):
+                is_available = True
+                available_store_name = "恵比寿店" if sc == "ebisu" else "半蔵門店"
+                break
+        
+        if is_available:
+            import json
+            # Interactive Flex Message
+            postback_data_accept = json.dumps({
+                "action": "waitlist_accept",
+                "date": date_str,
+                "time": time_str,
+                "store": available_store_name
+            })
+            postback_data_decline = json.dumps({
+                "action": "waitlist_decline"
+            })
+            
+            flex_content = {
+                "type": "bubble",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": "🚨 空き枠のお知らせ",
+                            "weight": "bold",
+                            "color": "#ff0000",
+                            "size": "md"
+                        },
+                        {
+                            "type": "text",
+                            "text": f"{entry['name']}様\nキャンセル待ちされていた以下の日時に空きが出ました！",
+                            "wrap": True,
+                            "size": "sm",
+                            "margin": "md"
+                        },
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "margin": "md",
+                            "spacing": "sm",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": f"📅 {date_str} {time_str}",
+                                    "weight": "bold",
+                                    "size": "md"
+                                },
+                                {
+                                    "type": "text",
+                                    "text": f"📍 {available_store_name}",
+                                    "weight": "bold",
+                                    "size": "md"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "この枠で予約手続きを進めますか？\n（※先着順となりますので、入れ違いで埋まってしまった場合はご了承ください🙇‍♂️）",
+                            "wrap": True,
+                            "size": "xs",
+                            "color": "#666666",
+                            "margin": "lg"
+                        }
+                    ],
+                    "paddingAll": "20px"
+                },
+                "footer": {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "md",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "action": {
+                                "type": "postback",
+                                "label": "受けます",
+                                "data": postback_data_accept,
+                                "displayText": "キャンセル待ちをお受けします（希望します）"
+                            },
+                            "style": "primary",
+                            "color": "#E63946"
+                        },
+                        {
+                            "type": "button",
+                            "action": {
+                                "type": "postback",
+                                "label": "見送ります",
+                                "data": postback_data_decline,
+                                "displayText": "今回は見送ります"
+                            },
+                            "style": "secondary"
+                        }
+                    ],
+                    "paddingAll": "20px"
+                }
+            }
+
+            try:
+                if entry["line_id"]:
+                    await line_service.push_flex(entry["line_id"], "空き枠のお知らせ", flex_content)
+                    sheets_service.update_waitlist_status(entry["row_index"], "通知済み")
+                    notified_count += 1
+                    results.append({"name": entry["name"], "status": "notified"})
+                else:
+                    results.append({"name": entry["name"], "status": "no_line_id"})
+            except Exception as e:
+                print(f"Failed to notify {entry['name']}: {e}")
+                results.append({"name": entry["name"], "status": "error", "error": str(e)})
+
+    return {
+        "status": "success",
+        "processed": len([e for e in waitlist if e["status"] == "待機中"]),
+        "notified": notified_count,
+        "details": results
+    }
+
+
 # ============================================================
 # Local development
 # ============================================================

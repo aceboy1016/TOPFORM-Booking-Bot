@@ -141,6 +141,17 @@ class LINEService:
             PushMessageRequest(to=to_user_id, messages=[message])
         )
 
+    async def push_flex(self, to_user_id: str, alt_text: str, flex_content: dict):
+        """Send a push Flex message to a user."""
+        message = FlexMessage(
+            altText=alt_text,
+            contents=FlexContainer.from_dict(flex_content),
+        )
+        from linebot.v3.messaging import PushMessageRequest
+        await self._api.push_message(
+            PushMessageRequest(to=to_user_id, messages=[message])
+        )
+
     # ============================================================
     # Postback handler
     # ============================================================
@@ -442,6 +453,53 @@ class LINEService:
             except Exception as e:
                 await self.reply_text(reply_token, f"❌ 送信に失敗しました: {e}")
                 
+        elif action == "waitlist_accept":
+            booking_date = data.get("date")
+            booking_time = data.get("time")
+            store_name = data.get("store")
+            display_name = user.get("display_name", "Unknown")
+            
+            # User response
+            await self.reply_text(
+                reply_token,
+                f"ありがとうございます！🎉\n\n"
+                f"📅 {booking_date} {booking_time}\n"
+                f"📍 {store_name}\n\n"
+                f"こちらの枠ですね。担当（石原）に通知しました。\n"
+                f"まもなくカレンダーに本予約を登録し、確定メッセージをお送りしますので少々お待ちください！"
+            )
+            
+            # Admin notification
+            if settings.ADMIN_USER_ID:
+                admin_msg = (
+                    f"✅ 【予約受付】\n\n"
+                    f"キャンセル待ちのお客様が空き枠を【承諾】しました！\n"
+                    f"登録完了した予約を受け付けました。\n\n"
+                    f"👤 {display_name} 様\n"
+                    f"📅 {booking_date} {booking_time}\n"
+                    f"📍 {store_name}\n\n"
+                    f"※hacomonoやカレンダーへの本予約登録をお願いします！"
+                )
+                try:
+                    await self.push_text(settings.ADMIN_USER_ID, admin_msg)
+                except Exception as e:
+                    print(f"Admin notification failed: {e}")
+                    
+        elif action == "waitlist_decline":
+            await self.reply_text(reply_token, "承知いたしました。\n今回はお見送りということで承りました。\nまたのご予約をお待ちしております！👋")
+            
+            # Admin notification
+            if settings.ADMIN_USER_ID:
+                display_name = user.get("display_name", "Unknown")
+                admin_msg = (
+                    f"⏩ 【スルー（見送り）】\n\n"
+                    f"キャンセル待ちのお客様が空き枠を見送りました（スルー）。\n\n"
+                    f"👤 {display_name} 様"
+                )
+                try:
+                    await self.push_text(settings.ADMIN_USER_ID, admin_msg)
+                except Exception as e:
+                    print(f"Admin notification failed: {e}")
 
         if action == "change_list_more":
             offset = data.get("off") or data.get("offset", 0)
