@@ -377,21 +377,108 @@ def _get_detailed_store_status(
         rooms_avail = ["Any"] * (3 - len(overlapping)) if not is_full else []
         return {"is_full": is_full, "rooms_available": rooms_avail}
 
+def is_topform_ishihara_booking(title: str) -> bool:
+    """Detect if an event is a TOPFORM-related hold."""
+    if not title: return False
+    normalized = re.sub(r"\s+", " ", title).lower()
+    for pattern in TOPFORM_PATTERNS:
+        if re.search(pattern, normalized, re.IGNORECASE):
+            return True
+    return False
+
+def is_trainer_busy(
+    slot_time: datetime,
+    ishihara_bookings: list[Booking],
+    all_bookings: BookingData,
+) -> bool:
+    """Check if the trainer has a conflicting booking."""
+    slot_end = slot_time + timedelta(minutes=SESSION_DURATION)
+    
+    for b in ishihara_bookings:
+        # Overlap check
+        if max(slot_time, b.start_dt) < min(slot_end, b.end_dt):
+            # Ignore if it's a TOPFORM hold without real work content
+            if is_topform_ishihara_booking(b.title):
+                # Search for any real work booking (source='work' or other) in the same time
+                has_real_work = False
+                for wb in all_bookings.ishihara:
+                    if wb.id != b.id and max(b.start_dt, wb.start_dt) < min(b.end_dt, wb.end_dt):
+                        if not is_topform_ishihara_booking(wb.title):
+                            has_real_work = True
+                            break
+                if not has_real_work:
+                    continue # Ignore this hold
+            
+            # If not a TOPFORM hold, or has real work content -> Busy
+            return True
+    return False
+
+def has_travel_conflict(
+    slot_time: datetime,
+    store: str,
+    ishihara_bookings: list[Booking],
+    all_bookings: BookingData,
+) -> bool:
+    """Check for travel time conflicts between stores (requires 1 hour travel)."""
+    travel_window_start = slot_time - timedelta(minutes=TRAVEL_TIME)
+    travel_window_end = slot_time + timedelta(minutes=SESSION_DURATION + TRAVEL_TIME)
+    
+    for b in ishihara_bookings:
+        # If no store info, ignore for travel conflict
+        if not b.store or b.store == "unknown":
+            continue
+            
+        # Same store -> no travel needed
+        if b.store == store:
+            continue
+            
+        # Overlap with travel window
+        if max(travel_window_start, b.start_dt) < min(travel_window_end, b.end_dt):
+            # Check if this is a TOPFORM hold to ignore
+            if is_topform_ishihara_booking(b.title):
+                continue
+            return True
+    return False
+
 def check_availability(
     slot_time: datetime,
     store: str,
     all_bookings: BookingData,
 ) -> dict:
+    """
+    Main availability check (Synced with TypeScript logic).
+    """
     now = datetime.now(JST)
-    if slot_time <= now + timedelta(hours=BOOKING_DEADLINE_HOURS):
+    # Check 3-hour deadline
+    if slot_time <= now + timedelta(hours=3):
         return {"is_available": False, "reason": "deadline"}
     
+    # Check 2-month rule (rough check)
+    if slot_time > now + timedelta(days=62):
+         return {"is_available": False, "reason": "too_far"}
+
+    # Business hours (Frontend handles this primarily, but backend validates it)
+    is_weekend = slot_time.weekday() >= 5 or _is_holiday(slot_time)
+    hours = BUSINESS_HOURS["weekend"] if is_weekend else BUSINESS_HOURS["weekday"]
+    if slot_time.hour < hours["start"] or slot_time.hour >= hours["end"]:
+        return {"is_available": False, "reason": "outside_hours"}
+
+    # 1. Day off check
     if _has_all_day_event(slot_time, all_bookings.ishihara):
         return {"is_available": False, "reason": "day_off"}
 
+    # 2. Store Capacity check
     store_status = _get_detailed_store_status(slot_time, store, all_bookings)
     if store_status["is_full"]:
         return {"is_available": False, "reason": "store_full"}
+
+    # 3. Trainer Busy check
+    if is_trainer_busy(slot_time, all_bookings.ishihara, all_bookings):
+        return {"is_available": False, "reason": "trainer_busy"}
+
+    # 4. Travel Conflict check
+    if has_travel_conflict(slot_time, store, all_bookings.ishihara, all_bookings):
+        return {"is_available": False, "reason": "travel_conflict"}
 
     return {"is_available": True, "rooms_available": store_status["rooms_available"]}
 
@@ -423,10 +510,3 @@ def get_available_slots(
         if check_availability(slot, store, all_bookings)["is_available"]:
             available.append(slot)
     return available
-
-def find_user_bookings(user_name: str, all_bookings: BookingData) -> list[Booking]:
-    matches = []
-    for b in all_bookings.ishihara:
-        if b.source == "work" and user_name in (b.title or ""):
-            matches.append(b)
-    return sorted(matches, key=lambda b: b.start_dt)
