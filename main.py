@@ -262,7 +262,10 @@ async def trigger_check_waitlist():
                 "store": available_store_name
             })
             postback_data_decline = json.dumps({
-                "action": "waitlist_decline"
+                "action": "waitlist_decline",
+                "date": date_str,
+                "time": time_str,
+                "store": available_store_name
             })
             
             flex_content = {

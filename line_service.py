@@ -491,10 +491,16 @@ class LINEService:
             # Admin notification
             if settings.ADMIN_USER_ID:
                 display_name = user.get("display_name", "Unknown")
+                booking_date = data.get("date", "不明")
+                booking_time = data.get("time", "不明")
+                store_name = data.get("store", "不明")
+                
                 admin_msg = (
                     f"⏩ 【スルー（見送り）】\n\n"
                     f"キャンセル待ちのお客様が空き枠を見送りました（スルー）。\n\n"
-                    f"👤 {display_name} 様"
+                    f"👤 {display_name} 様\n"
+                    f"📅 {booking_date} {booking_time}\n"
+                    f"📍 {store_name}"
                 )
                 try:
                     await self.push_text(settings.ADMIN_USER_ID, admin_msg)
