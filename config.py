@@ -82,7 +82,7 @@ ADVANCE_BOOKING_MONTHS = 2  # 2ヶ月先まで予約可
 
 # 営業時間
 BUSINESS_HOURS = {
-    "weekday": {"start": 9, "end": 22},  # 最終枠 21:00
+    "weekday": {"start": 8, "end": 23},  # 最終枠 22:00
     "weekend": {"start": 9, "end": 20},  # 最終枠 19:00
 }
 
