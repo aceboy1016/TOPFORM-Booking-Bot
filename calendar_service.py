@@ -510,3 +510,11 @@ def get_available_slots(
         if check_availability(slot, store, all_bookings)["is_available"]:
             available.append(slot)
     return available
+
+
+def find_user_bookings(user_name: str, all_bookings: BookingData) -> list[Booking]:
+    matches = []
+    for b in all_bookings.ishihara:
+        if b.source == "work" and user_name in (b.title or ""):
+            matches.append(b)
+    return sorted(matches, key=lambda b: b.start_dt)
