@@ -1,0 +1,15 @@
+{
+  "read_deny": [
+    ".env",
+    ".clasp.json",
+    "credentials/*.json"
+  ],
+  "agents": {
+    "code-reviewer": {
+      "model": "claude-3-5-haiku"
+    },
+    "gas-debugger": {
+      "model": "claude-3-5-haiku"
+    }
+  }
+}
