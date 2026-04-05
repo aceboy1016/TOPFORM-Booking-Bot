@@ -515,6 +515,10 @@ def get_available_slots(
 def find_user_bookings(user_name: str, all_bookings: BookingData) -> list[Booking]:
     matches = []
     for b in all_bookings.ishihara:
-        if b.source == "work" and user_name in (b.title or ""):
+        if b.source != "work": # プライベート予定は除外
+            continue
+        title = b.title or ""
+        normalized_name = user_name.replace(" ", "").replace("　", "")
+        if normalized_name in title.replace(" ", "").replace("　", ""):
             matches.append(b)
     return sorted(matches, key=lambda b: b.start_dt)
