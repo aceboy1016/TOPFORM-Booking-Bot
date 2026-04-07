@@ -65,6 +65,30 @@ class CalendarService:
     def __init__(self):
         self._service = None
         self._credentials = None
+        self._consecutive_errors = 0  # 連続エラー回数
+        self._error_notified = False  # 通知済みフラグ（連続エラー中の重複通知防止）
+
+    def _notify_admin_error(self, message: str):
+        """カレンダーAPIエラーを管理者LINEに通知する（同期）。"""
+        try:
+            import urllib.request
+            admin_id = settings.ADMIN_USER_ID
+            token = settings.LINE_CHANNEL_ACCESS_TOKEN
+            if not admin_id or not token:
+                return
+            body = json.dumps({
+                "to": admin_id,
+                "messages": [{"type": "text", "text": message}]
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.line.me/v2/bot/message/push",
+                data=body,
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+                method="POST"
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception as e:
+            print(f"⚠️ Admin notification failed: {e}")
 
     async def initialize(self):
         """Async wrapper for initialization."""
@@ -125,9 +149,12 @@ class CalendarService:
                 )
                 .execute()
             )
+            self._consecutive_errors = 0
+            self._error_notified = False
             return result.get("items", [])
         except Exception as e:
             print(f"❌ Failed to fetch events from {calendar_id}: {e}")
+            self._consecutive_errors += 1
             return []
 
     def _transform_event(self, event: dict, store: str, source: str = "work") -> Optional[Booking]:
@@ -192,11 +219,21 @@ class CalendarService:
         time_min = today.isoformat()
         time_max = (today + timedelta(days=ADVANCE_BOOKING_MONTHS * 30)).isoformat()
 
-        # Fetch raw events
+        # Fetch raw events（エラーカウントをリセットして計測開始）
+        self._consecutive_errors = 0
         ebisu_events = self._fetch_events(CALENDAR_IDS["ebisu"], time_min, time_max)
         hanzomon_events = self._fetch_events(CALENDAR_IDS["hanzoomon"], time_min, time_max)
         work_events = self._fetch_events(CALENDAR_IDS["ishihara_work"], time_min, time_max)
         private_events = self._fetch_events(CALENDAR_IDS["ishihara_private"], time_min, time_max)
+
+        # 全カレンダーが失敗している場合に管理者へ通知
+        if self._consecutive_errors >= 4 and not self._error_notified:
+            self._error_notified = True
+            self._notify_admin_error(
+                "⚠️ [TOPFORM Bot] Googleカレンダーへの接続が失敗しています。\n"
+                "予約確認・空き確認が正常に動作していない可能性があります。\n"
+                "しばらく待っても改善しない場合はサーバーの再起動をお試しください。"
+            )
 
         # Transform
         ebisu_bookings = []
