@@ -64,6 +64,7 @@ class CalendarService:
 
     def __init__(self):
         self._service = None
+        self._credentials = None
 
     async def initialize(self):
         """Async wrapper for initialization."""
@@ -97,7 +98,7 @@ class CalendarService:
             creds_data,
             scopes=["https://www.googleapis.com/auth/calendar.readonly"],
         )
-        
+        self._credentials = credentials
         # Build is technically blocking but happens only once at startup
         self._service = build("calendar", "v3", credentials=credentials)
 
@@ -105,11 +106,16 @@ class CalendarService:
         self, calendar_id: str, time_min: str, time_max: str
     ) -> list[dict]:
         """Fetch events from a single calendar."""
-        if not self._service:
+        if not self._credentials:
             return []
         try:
+            # 毎回新しいHTTP接続を生成して長期接続による切断を防ぐ
+            import httplib2
+            http = self._credentials.authorize(httplib2.Http())
+            from googleapiclient.discovery import build
+            service = build("calendar", "v3", http=http)
             result = (
-                self._service.events()
+                service.events()
                 .list(
                     calendarId=calendar_id,
                     timeMin=time_min,
