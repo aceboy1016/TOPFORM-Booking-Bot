@@ -109,10 +109,9 @@ class CalendarService:
         if not self._credentials:
             return []
         try:
-            # 毎回新しいHTTP接続を生成して長期接続による切断を防ぐ
-            import httplib2
-            http = self._credentials.authorize(httplib2.Http())
-            from googleapiclient.discovery import build
+            # 毎回新しいHTTPセッションを生成して長期接続による切断を防ぐ
+            import google_auth_httplib2, httplib2
+            http = google_auth_httplib2.AuthorizedHttp(self._credentials, http=httplib2.Http())
             service = build("calendar", "v3", http=http)
             result = (
                 service.events()
