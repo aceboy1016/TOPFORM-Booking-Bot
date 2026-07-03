@@ -777,11 +777,12 @@ class LINEService:
             await self._handle_bulk_booking(reply_token, user_id, user, bulk_entries)
             return
 
-        if "予約" in text or "booking" in text.lower():
+        in_active_booking_flow = bool(session) and session.get("flow_type") == "booking"
+        if not in_active_booking_flow and ("予約" in text or "booking" in text.lower()):
             force_select = "店舗変更" in text or "変更" in text
             await self._start_booking_flow(reply_token, user_id, user, force_store_select=force_select)
             return
-            
+
         # (Old ID check removed from here)
 
         # ---- Active session flow ----
