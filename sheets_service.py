@@ -18,6 +18,7 @@ class SheetsService:
 
     def __init__(self):
         self._service = None
+        self._credentials = None
         self._sheet_id = settings.GOOGLE_SHEET_ID
         self._cached_data = None
         self._last_fetch = None
@@ -44,16 +45,25 @@ class SheetsService:
                 creds_data,
                 scopes=["https://www.googleapis.com/auth/spreadsheets"],
             )
+            self._credentials = credentials
             self._service = build("sheets", "v4", credentials=credentials)
             print("✅ Google Sheets Service initialized")
         except Exception as e:
             print(f"❌ Failed to initialize Sheets Service: {e}")
 
+    def _get_fresh_service(self):
+        """毎回新しいHTTPセッションを生成して長期接続による切断（Broken pipe）を防ぐ"""
+        if not self._credentials:
+            return None
+        import google_auth_httplib2, httplib2
+        http = google_auth_httplib2.AuthorizedHttp(self._credentials, http=httplib2.Http())
+        return build("sheets", "v4", http=http)
+
     def fetch_customer_master(self, force_refresh: bool = False) -> List[Dict]:
         """Fetch customer master data from spreadsheet."""
-        if not self._service:
+        if not self._credentials:
             self.initialize()
-            if not self._service:
+            if not self._credentials:
                 return []
 
         now = datetime.now()
@@ -67,8 +77,11 @@ class SheetsService:
 
         try:
             sheet_range = "A2:E"
+            service = self._get_fresh_service()
+            if not service:
+                return self._cached_data or []
             result = (
-                self._service.spreadsheets()
+                service.spreadsheets()
                 .values()
                 .get(spreadsheetId=self._sheet_id, range=sheet_range)
                 .execute()
@@ -128,14 +141,17 @@ class SheetsService:
 
     def fetch_waitlist(self) -> List[Dict]:
         """キャンセル待ちリストを取得する。"""
-        if not self._service:
+        if not self._credentials:
             self.initialize()
-            if not self._service: return []
+            if not self._credentials: return []
 
         try:
             sheet_range = "キャンセル待ち!A2:G"
+            service = self._get_fresh_service()
+            if not service:
+                return []
             result = (
-                self._service.spreadsheets().values().get(spreadsheetId=self._sheet_id, range=sheet_range).execute()
+                service.spreadsheets().values().get(spreadsheetId=self._sheet_id, range=sheet_range).execute()
             )
             rows = result.get("values", [])
             
@@ -162,11 +178,15 @@ class SheetsService:
 
     def update_waitlist_status(self, row_index: int, status: str):
         """キャンセル待ちのステータスを更新する。"""
-        if not self._service: return
+        if not self._credentials:
+            self.initialize()
+            if not self._credentials: return
         try:
+            service = self._get_fresh_service()
+            if not service: return
             cell_range = f"キャンセル待ち!G{row_index}"
             body = {"values": [[status]]}
-            self._service.spreadsheets().values().update(
+            service.spreadsheets().values().update(
                 spreadsheetId=self._sheet_id, range=cell_range,
                 valueInputOption="USER_ENTERED", body=body
             ).execute()
