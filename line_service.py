@@ -846,6 +846,26 @@ class LINEService:
     # ============================================================
     # Date query parsing
     # ============================================================
+    def _extract_time(self, text: str) -> Optional[tuple[int, int]]:
+        """
+        Extract a specific HH:MM time from natural language text.
+        Supports: 19:00 / 19：00 / 19時 / 19時30分
+        """
+        m = re.search(r"(\d{1,2})[:：](\d{2})", text)
+        if m:
+            hour, minute = int(m.group(1)), int(m.group(2))
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return hour, minute
+
+        m = re.search(r"(\d{1,2})時(?:(\d{1,2})分)?", text)
+        if m:
+            hour = int(m.group(1))
+            minute = int(m.group(2)) if m.group(2) else 0
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return hour, minute
+
+        return None
+
     def _parse_multiple_dates(self, text: str) -> list[datetime]:
         """
         Parse natural language text for multiple dates.
@@ -1099,37 +1119,33 @@ class LINEService:
                 return
 
             # --- One-shot DateTime Check (案1: 日時一発指定) ---
-            # Check if time is also provided in text (e.g. "10:00")
-            m_time = re.search(r"(\d{1,2})[:：](\d{2})", text)
-            if m_time:
-                hour = int(m_time.group(1))
-                minute = int(m_time.group(2))
-                
+            # Check if time is also provided in text (e.g. "10:00", "19時")
+            t = self._extract_time(text)
+            if t:
+                hour, minute = t
+                time_str = f"{hour:02d}:{minute:02d}"
+
                 # Check availability for this specific time
-                is_available = False
-                for s in slots:
-                    if s.hour == hour and s.minute == minute:
-                        is_available = True
-                        break
-                
+                is_available = any(s.hour == hour and s.minute == minute for s in slots)
+
+                data["date"] = target_date.strftime("%Y-%m-%d")
+
                 if is_available:
                     # Move state to select_time, effectively pre-selecting date
-                    data["date"] = target_date.strftime("%Y-%m-%d")
                     await db.set_session(
                         user_id, "booking", "select_time", json.dumps(data)
                     )
-                    
+
                     # Confirm with user
-                    time_str = f"{hour:02d}:{minute:02d}"
                     confirm_text = (
-                        f"📅 {date_str}（{wd}） {time_str}\n"
+                        f"✅ {date_str}（{wd}） {time_str}\n"
                         f"📍 {store_name}\n\n"
-                        f"こちらの内容で予約手続きを進めますか？"
+                        f"予約できます！こちらの内容で予約手続きを進めますか？"
                     )
-                    
+
                     # Button sends the time string back, triggering select_time logic
                     yes_action = MessageAction(label="はい、予約する", text=time_str)
-                    
+
                     # "Show other times" button sends the DATE string back, triggering select_date logic (fallback in select_time)
                     other_action = MessageAction(label="他の時間を見る", text=date_str)
 
@@ -1140,6 +1156,33 @@ class LINEService:
                             QuickReplyItem(action=yes_action),
                             QuickReplyItem(action=other_action)
                         ])
+                    )
+                    return
+                else:
+                    # Requested time is taken: say so explicitly, then offer alternatives
+                    await db.set_session(
+                        user_id, "booking", "select_time", json.dumps(data)
+                    )
+
+                    items = [
+                        QuickReplyItem(action=MessageAction(label=s.strftime("%H:%M"), text=s.strftime("%H:%M")))
+                        for s in slots[:12]
+                    ]
+                    items.append(QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")))
+
+                    slot_list = "\n".join(
+                        [f"🕐 {s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
+                    )
+
+                    await self.reply_text(
+                        reply_token,
+                        f"""😔 {date_str}（{wd}） {time_str} は埋まっております。
+
+他の空き時間はこちら👇
+{slot_list}
+
+ご希望の時間を選択してください""",
+                        quick_reply=QuickReply(items=items),
                     )
                     return
             # -------------------------------------
@@ -1540,8 +1583,8 @@ class LINEService:
             await self._process_select_date(reply_token, user_id, session, text, data)
 
         elif state == "select_time":
-            m = re.match(r"(\d{1,2}):(\d{2})", text)
-            if not m:
+            t = self._extract_time(text)
+            if not t:
                 # Fallback: check if it matches a date
                 dates = self._parse_multiple_dates(text)
                 if dates:
@@ -1550,12 +1593,11 @@ class LINEService:
 
                 await self.reply_text(
                     reply_token,
-                    "時間の形式が正しくありません。\n例: 10:00\n\n別の日時なら「2/20」のように入力してね！",
+                    "時間の形式が正しくありません。\n例: 10:00 / 19時\n\n別の日時なら「2/20」のように入力してね！",
                 )
                 return
 
-            hour = int(m.group(1))
-            minute = int(m.group(2))
+            hour, minute = t
             date_str = data.get("date")
             store = data.get("store", "ebisu")
             room_pref = data.get("room_pref")
