@@ -10,7 +10,7 @@ from typing import Optional, Dict, List
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-from config import settings
+from config import settings, GOOGLE_API_TIMEOUT
 
 
 class SheetsService:
@@ -56,7 +56,11 @@ class SheetsService:
         if not self._credentials:
             return None
         import google_auth_httplib2, httplib2
-        http = google_auth_httplib2.AuthorizedHttp(self._credentials, http=httplib2.Http())
+        # timeout必須: 未指定だと応答が無い場合に無限待機し、ワーカー1個のCloud Runでは
+        # インスタンス全体が停止してLINEのWebhookも受けられなくなる
+        http = google_auth_httplib2.AuthorizedHttp(
+            self._credentials, http=httplib2.Http(timeout=GOOGLE_API_TIMEOUT)
+        )
         return build("sheets", "v4", http=http)
 
     def fetch_customer_master(self, force_refresh: bool = False) -> List[Dict]:

@@ -80,6 +80,11 @@ BOOKING_DEADLINE_HOURS = 12  # 予約変更・キャンセル締切（1回消化
 URGENT_CONTACT_DEADLINE_HOURS = 3  # 直前連絡デッドライン（管理者通知）：3時間前
 ADVANCE_BOOKING_MONTHS = 2  # 2ヶ月先まで予約可
 
+# Google API (Calendar / Sheets) のHTTPタイムアウト（秒）
+# 未設定だと応答が無い場合に無限待機し、ワーカー1個のCloud Runでは
+# インスタンス全体が停止してLINEのWebhookも受けられなくなるため必須。
+GOOGLE_API_TIMEOUT = 15
+
 # 営業時間
 BUSINESS_HOURS = {
     "weekday": {"start": 8, "end": 23},  # 最終枠 22:00

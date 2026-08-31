@@ -29,6 +29,7 @@ from config import (
     BLOCKING_KEYWORDS,
     UNAVAILABLE_KEYWORD,
     STORE_NAMES,
+    GOOGLE_API_TIMEOUT,
 )
 
 import pytz
@@ -134,8 +135,12 @@ class CalendarService:
             return []
         try:
             # 毎回新しいHTTPセッションを生成して長期接続による切断を防ぐ
+            # timeout必須: 未指定だと応答が無い場合に無限待機し、ワーカー1個のCloud Runでは
+            # インスタンス全体が停止してLINEのWebhookも受けられなくなる
             import google_auth_httplib2, httplib2
-            http = google_auth_httplib2.AuthorizedHttp(self._credentials, http=httplib2.Http())
+            http = google_auth_httplib2.AuthorizedHttp(
+                self._credentials, http=httplib2.Http(timeout=GOOGLE_API_TIMEOUT)
+            )
             service = build("calendar", "v3", http=http)
             result = (
                 service.events()
