@@ -57,8 +57,8 @@
 
 ## 実施済み検証
 
-- Python 3.12.12 / SQLite：68成功、PostgreSQL専用移行テスト1件は対象外。
-- ローカル専用PostgreSQL 16.15：69成功（移行の成功、二重インポート拒否、通知を送らないことを含む）。
+- Python 3.12.12 / SQLite：69成功、PostgreSQL専用移行テスト1件は対象外。
+- ローカル専用PostgreSQL 16.15：70成功（移行の成功、二重インポート拒否、通知を送らないことを含む）。
 - requirements.lockのハッシュ付きインストール、pip check、git diff --check、deploy.sh構文検査。
 - 本番Google/LINEへの書込や通知送信は行っていない。Docker実行環境がないためローカルコンテナビルドは未実施。
 - Cloud Buildの2つの既存自動配備トリガーはいずれも `^main$` に限定されることを読み取り確認。mainへマージすると配備が走るため、移行準備完了までマージしない。

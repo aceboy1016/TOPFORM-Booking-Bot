@@ -15,6 +15,7 @@ async def resolve_booking(service,user_id,user,kind,ident):
         if not row or row['status'] not in ('provisional','confirmed'): return None
         return {'id':row['public_id'],'type':'db','dt':as_jst(datetime.fromisoformat(row['slot_datetime'])),'store':row['store']}
     if kind=='cal':
+        if await db.is_done('calendar-cancel:'+user_id+':'+ident): return None
         snapshot=await service._get_bookings(force=True)
         matches=find_user_bookings(user.get('display_name',''),snapshot,user_id,allow_legacy=not user.get('ambiguous_name',False))
         found=[b for b in matches if b.id==ident]
