@@ -294,7 +294,8 @@ async def test_free_text_date_before_store_retains_time(service,database):
     await service.handle_text_message(event('恵比寿でお願いします'),user())
     s,d=await state(database)
     assert d['date']==dt.strftime('%Y-%m-%d') and d['store']=='ebisu'
-    assert '15:30' in service.reply_text.call_args.args[1]
+    assert s['flow_state']=='confirm' and d['time']=='15:30'
+    assert '15:30' in json.dumps(service.reply_flex.call_args.args[2], ensure_ascii=False)
 
 async def test_change_store_in_free_text_at_confirmation(service,database):
     dt=future()
@@ -310,4 +311,5 @@ async def test_combined_free_text_from_store_step(service,database):
     await service.handle_text_message(event(f'{dt.month}/{dt.day} 15時半に恵比寿でお願いします'),user())
     s,d=await state(database)
     assert d['date']==dt.strftime('%Y-%m-%d') and d['store']=='ebisu'
-    assert '15:30' in service.reply_text.call_args.args[1]
+    assert s['flow_state']=='confirm' and d['time']=='15:30'
+    assert '15:30' in json.dumps(service.reply_flex.call_args.args[2], ensure_ascii=False)

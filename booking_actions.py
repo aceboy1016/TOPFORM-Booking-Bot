@@ -58,6 +58,26 @@ async def handle_action(service,event,user):
     if not data:
         await service.reply_text(token,'⏳ このボタンは期限切れです。\n\n「予約確認」から最新の予約を表示してくださいね😊');return
     action=data.get('a')
+    if action in ('pick_slot', 'picker_page', 'picker_confirm'):
+        session = await db.get_session(uid)
+        context = json.loads(session.get('flow_data', '{}')) if session else {}
+        valid = session and session.get('flow_type') == 'booking'
+        if action == 'picker_confirm':
+            valid = valid and session.get('flow_state') == 'confirm' and context.get('confirmation_id') == data.get('confirmation_id')
+        else:
+            valid = valid and context.get('picker_id') == data.get('picker_id') and session.get('flow_state') in ('select_time', 'select_store_after_date')
+        if not valid:
+            await service.reply_text(token, '🌿 この選択は終了しています。ご希望の日をもう一度教えてくださいね😊')
+            return
+        if action == 'picker_confirm':
+            await service._handle_booking_flow(token, uid, user, session, '確定する')
+        elif action == 'picker_page':
+            await service._show_available_cards(token, uid, context, data['date_offset'], data['slot_offset'], data.get('store'))
+        else:
+            context.update(date=data['date'], store=data['store'])
+            await db.set_session(uid, 'booking', 'select_time', json.dumps(context))
+            await service._handle_booking_flow(token, uid, user, await db.get_session(uid), data['time'])
+        return
     if action in ('waitlist_accept','waitlist_decline'):
         row=await db.get_waitlist(data['wid'],uid)
         if not row or row['state']!='offered':

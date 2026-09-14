@@ -4,6 +4,7 @@ LINEメッセージの処理と予約フローの管理
 """
 
 import asyncio
+import uuid
 import json
 from async_services import google_call
 from booking_rules import parse_slot, REASONS
@@ -363,17 +364,9 @@ class LINEService:
         # ---- 自然言語解析: 「○日空いてる？」----
         dates = self._parse_multiple_dates(text)
         if dates:
-            snapshot=await self._get_bookings()
-            lines=[]
-            for d in dates[:31]:
-                parts=[]
-                for store,name in STORE_NAMES.items():
-                    slots=get_available_slots(d,store,snapshot)
-                    parts.append(name+': '+(', '.join(x.strftime('%H:%M') for x in slots) or '空きなし'))
-                lines.append(d.strftime('%m/%d')+'\n'+'\n'.join(parts))
-            content='\n\n'.join(lines)
-            messages=[TextMessage(text=content[i:i+4500]) for i in range(0,len(content),4500)]
-            await self.reply_messages(reply_token,messages[:5])
+            stores = [key for key, name in STORE_NAMES.items() if name.replace("店", "") in text]
+            data = {"store": stores[0] if len(stores) == 1 else "both", "room_pref": user.get("room_pref")}
+            await self._process_select_date(reply_token, user_id, {}, text, data)
             return
 
         # ---- 挨拶・労いへの返信 ----
@@ -435,325 +428,71 @@ class LINEService:
         return parse_dates(text,datetime.now(JST))
 
     async def _process_select_date(self, reply_token, user_id, session, text, data):
-        """Handle date selection logic, supporting multiple dates."""
-        target_dates = self._parse_multiple_dates(text)
-        
-        if not target_dates:
-            await self.reply_text(
-                reply_token,
-                """📅 ご希望の日を教えてください😊
-「明日」「来週の土曜」「9/26」など、普段の言い方で大丈夫です。
-
-新しい予約なら「予約したい」、途中の操作をやめるなら「やめる」と送ってくださいね。""",
-                quick_reply=QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
-            )
+        """Keep inquiries and booking selections in the same draft."""
+        dates = self._parse_multiple_dates(text)
+        if not dates:
+            await self.reply_text(reply_token, '📅 ご希望の日を教えてください😊\n「明日」「来週の土曜」「9/26」などで大丈夫です。')
             return
-
-        store = data.get("store", "ebisu")
-        bookings = await self._get_bookings()
-        
-        # --- Suggestion Logic ---
-        # If multiple dates found, save them as suggestions
-        if len(target_dates) > 1:
-            data["suggested_dates"] = [d.strftime("%Y-%m-%d") for d in target_dates]
-        
-        # If single date found, remove it from suggestions if exists
-        if len(target_dates) == 1:
-            td_str = target_dates[0].strftime("%Y-%m-%d")
-            sug = data.get("suggested_dates", [])
-            if td_str in sug:
-                sug.remove(td_str)
-                data["suggested_dates"] = sug
-        # ------------------------
-
-        # ========== BOTH STORES MODE ==========
-        if store == "both":
-            data["was_both"] = True
-            if len(target_dates) == 1:
-                target_date = target_dates[0]
-                date_str = target_date.strftime("%m/%d")
-                wd = WEEKDAY_JP[target_date.weekday()]
-
-                ebisu_slots = get_available_slots(target_date, "ebisu", bookings)
-                hanzomon_slots = get_available_slots(target_date, "hanzoomon", bookings)
-
-                if not ebisu_slots and not hanzomon_slots:
-                    await self.reply_text(
-                        reply_token,
-                        f"😔 {date_str}（{wd}）は両店舗とも空きがありません。\n\n別の日時を入力してください📅",
-                    )
-                    return
-
-                # Build combined display
-                msg_parts = [f"📅 {date_str}（{wd}）の空き状況\n"]
-
-                if ebisu_slots:
-                    e_list = "\n".join([f"  🕐 {s.strftime('%H:%M')}" for s in ebisu_slots])
-                    msg_parts.append(f"🏢 恵比寿店\n{e_list}")
-                else:
-                    msg_parts.append("🏢 恵比寿店: 満席 🈵")
-
-                if hanzomon_slots:
-                    h_list = "\n".join([f"  🕐 {s.strftime('%H:%M')}" for s in hanzomon_slots])
-                    msg_parts.append(f"🏯 半蔵門店\n{h_list}")
-                else:
-                    msg_parts.append("🏯 半蔵門店: 満席 🈵")
-
-                msg_parts.append("どちらの店舗で予約しますか？👇")
-
-                data["date"] = target_date.strftime("%Y-%m-%d")
-                await db.set_session(
-                    user_id, "booking", "select_store_after_date", json.dumps(data)
-                )
-
-                # QuickReply to pick store
-                qr_items = []
-                if ebisu_slots:
-                    qr_items.append(QuickReplyItem(action=MessageAction(label="恵比寿店", text="恵比寿店")))
-                if hanzomon_slots:
-                    qr_items.append(QuickReplyItem(action=MessageAction(label="半蔵門店", text="半蔵門店")))
-
-                # Add Back button
-                qr_items.append(QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")))
-
-                await self.reply_text(
-                    reply_token,
-                    "\n\n".join(msg_parts),
-                    quick_reply=QuickReply(items=qr_items) if qr_items else None,
-                )
+        data = dict(data)
+        data['picker_id'] = uuid.uuid4().hex
+        data['picker_filter'] = text
+        data['picker_dates'] = [d.strftime('%Y-%m-%d') for d in dates[:31]]
+        data['store'] = data.get('store') or 'both'
+        for key in ('time', 'pending_time', 'room'):
+            data.pop(key, None)
+        if len(dates) == 1:
+            data['date'] = data['picker_dates'][0]
+        else:
+            data.pop('date', None)
+        state = 'select_time' if len(dates) == 1 and data['store'] in STORE_NAMES else 'select_store_after_date'
+        await db.set_session(user_id, 'booking', state, json.dumps(data))
+        requested = self._extract_time(text)
+        exact_request = requested and not any(word in text for word in ('以降', 'まで', '午前', '午後', '夕方', '夜')) and len(dates) == 1 and data['store'] in STORE_NAMES
+        if exact_request:
+            slots = get_available_slots(dates[0], data['store'], await self._get_bookings())
+            if any((slot.hour, slot.minute) == requested for slot in slots):
+                customer = await google_call(sheets_service.get_customer_by_line_id, user_id)
+                user = {'display_name': customer['name'], 'room_pref': customer.get('room_pref')} if customer else {}
+                await self._handle_booking_flow(reply_token, user_id, user, await db.get_session(user_id), '%02d:%02d' % requested)
                 return
+        await self._show_available_cards(reply_token, user_id, data, note='ご希望の時刻に空きがありません。こちらの時間はいかがですか？😊' if exact_request else '')
 
-            # Multiple dates + both stores
-            msg_lines = []
-            for td in target_dates:
-                d_str = td.strftime("%m/%d")
-                wd = WEEKDAY_JP[td.weekday()]
-                e_slots = get_available_slots(td, "ebisu", bookings)
-                h_slots = get_available_slots(td, "hanzoomon", bookings)
+    async def _show_available_cards(self, token, uid, data, date_offset=0, slot_offset=0, only_store=None, note=''):
+        snapshot = await self._get_bookings()
+        stores = [only_store] if only_store else ([data['store']] if data['store'] in STORE_NAMES else list(STORE_NAMES))
+        dates = data['picker_dates']
+        cards = []
+        async def button(label, payload):
+            action = await db.make_action(uid, dict(payload, picker_id=data['picker_id']))
+            return {'type': 'button', 'height': 'sm', 'style': 'secondary', 'action': {'type': 'postback', 'label': label, 'data': action}}
+        for date in dates[date_offset:date_offset + (1 if only_store else 4)]:
+            day = datetime.strptime(date, '%Y-%m-%d')
+            for store in stores:
+                slots = get_available_slots(day, store, snapshot)
+                query = data.get('picker_filter', '')
+                after = re.search(r'(\d{1,2})時以降', query)
+                if after:
+                    slots = [slot for slot in slots if slot.hour >= int(after.group(1))]
+                elif '午前' in query or '朝' in query:
+                    slots = [slot for slot in slots if slot.hour < 12]
+                elif '午後' in query:
+                    slots = [slot for slot in slots if slot.hour >= 12]
+                elif '夜' in query or '夕方' in query:
+                    slots = [slot for slot in slots if slot.hour >= 17]
+                body = [{'type': 'text', 'text': '📅 '+day.strftime('%m/%d')+'（'+WEEKDAY_JP[day.weekday()]+'）', 'weight': 'bold', 'size': 'lg'},
+                        {'type': 'text', 'text': '📍 '+STORE_NAMES[store], 'margin': 'md'},
+                        {'type': 'text', 'text': note or ('空き時間をタップしてください👇' if slots else '🌿 この日の空きはありません。別の日も聞いてくださいね。'), 'wrap': True, 'size': 'sm', 'margin': 'md'}]
+                for slot in slots[slot_offset:slot_offset+10]:
+                    body.append(await button('🕐 '+slot.strftime('%H:%M'), {'a':'pick_slot', 'date':date, 'store':store, 'time':slot.strftime('%H:%M')}))
+                if len(slots) > slot_offset+10:
+                    body.append(await button('次の時間を見る ➡️', {'a':'picker_page', 'date_offset':dates.index(date), 'slot_offset':slot_offset+10, 'store':store}))
+                if slot_offset:
+                    body.append(await button('最初の時間へ ↩️', {'a':'picker_page', 'date_offset':dates.index(date), 'slot_offset':0, 'store':store}))
+                cards.append({'type':'bubble', 'body':{'type':'box','layout':'vertical','spacing':'sm','contents':body}})
+        if not only_store and date_offset+4 < len(dates):
+            cards.append({'type':'bubble','body':{'type':'box','layout':'vertical','contents':[await button('次の日程を見る ➡️', {'a':'picker_page','date_offset':date_offset+4,'slot_offset':0})]}})
+        await self.reply_messages(token, [FlexMessage(alt_text='📅 空き時間を選んで仮予約へ😊', contents=FlexContainer.from_dict({'type':'carousel','contents':cards}))])
 
-                e_count = len(e_slots)
-                h_count = len(h_slots)
-
-                if e_count == 0 and h_count == 0:
-                    msg_lines.append(f"📅 {d_str}（{wd}）: 両店舗満席 🈵")
-                else:
-                    e_info = f"恵比寿{e_count}枠" if e_count > 0 else "恵比寿✕"
-                    h_info = f"半蔵門{h_count}枠" if h_count > 0 else "半蔵門✕"
-                    msg_lines.append(f"📅 {d_str}（{wd}）: {e_info} / {h_info}")
-
-            if not msg_lines:
-                msg_lines.append("ご希望の日程に空きは見つかりませんでした🙇‍♂️")
-
-            final_msg = "\n".join(msg_lines)
-            if len(final_msg) > 1000:
-                final_msg = final_msg[:1000] + "\n..."
-
-            await self.reply_text(
-                reply_token,
-                f"""■ 両店舗の空き状況
-
-{final_msg}
-
-ご希望の日時（1日）を指定してください！""",
-                quick_reply=QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
-            )
-            await db.set_session(user_id, "booking", "select_date", json.dumps(data))
-            return
-        # ========== END BOTH STORES MODE ==========
-
-        # If single date found
-        if len(target_dates) == 1:
-            target_date = target_dates[0]
-            slots = get_available_slots(target_date, store, bookings)
-
-            date_str = target_date.strftime("%m/%d")
-            wd = WEEKDAY_JP[target_date.weekday()]
-            store_name = STORE_NAMES.get(store, store)
-
-            if not slots:
-                await self.reply_text(
-                    reply_token,
-                    f"""😔 {date_str}（{wd}）は{store_name}の空きがありません。
-
-別の日時を入力してください📅""",
-                )
-                return
-
-            # --- One-shot DateTime Check (案1: 日時一発指定) ---
-            # Check if time is also provided in text (e.g. "10:00", "19時")
-            t = self._extract_time(text)
-            if t:
-                hour, minute = t
-                time_str = f"{hour:02d}:{minute:02d}"
-
-                # Check availability for this specific time
-                is_available = any(s.hour == hour and s.minute == minute for s in slots)
-
-                data["date"] = target_date.strftime("%Y-%m-%d")
-
-                if is_available:
-                    # Move state to select_time, effectively pre-selecting date
-                    await db.set_session(
-                        user_id, "booking", "select_time", json.dumps(data)
-                    )
-
-                    # Confirm with user
-                    confirm_text = (
-                        f"✅ {date_str}（{wd}） {time_str}\n"
-                        f"📍 {store_name}\n\n"
-                        f"予約できます！こちらの内容で予約手続きを進めますか？"
-                    )
-
-                    # Button sends the time string back, triggering select_time logic
-                    yes_action = MessageAction(label="はい、予約する", text=time_str)
-
-                    # "Show other times" button sends the DATE string back, triggering select_date logic (fallback in select_time)
-                    other_action = MessageAction(label="他の時間を見る", text=date_str)
-
-                    await self.reply_text(
-                        reply_token,
-                        confirm_text,
-                        quick_reply=QuickReply(items=[
-                            QuickReplyItem(action=yes_action),
-                            QuickReplyItem(action=other_action)
-                        ])
-                    )
-                    return
-                else:
-                    # Requested time is taken: say so explicitly, then offer alternatives
-                    await db.set_session(
-                        user_id, "booking", "select_time", json.dumps(data)
-                    )
-
-                    items = [
-                        QuickReplyItem(action=MessageAction(label=s.strftime("%H:%M"), text=s.strftime("%H:%M")))
-                        for s in slots[:12]
-                    ]
-                    items.append(QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")))
-
-                    slot_list = "\n".join(
-                        [f"🕐 {s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
-                    )
-
-                    await self.reply_text(
-                        reply_token,
-                        f"""😔 {date_str}（{wd}） {time_str} は埋まっております。
-
-他の空き時間はこちら👇
-{slot_list}
-
-ご希望の時間を選択してください""",
-                        quick_reply=QuickReply(items=items),
-                    )
-                    return
-            # -------------------------------------
-
-            data["date"] = target_date.strftime("%Y-%m-%d")
-            await db.set_session(
-                user_id, "booking", "select_time", json.dumps(data)
-            )
-
-            # Build quick reply with time slots
-            items = []
-            for slot in slots[:12]:
-                time_str = slot.strftime("%H:%M")
-                items.append(
-                    QuickReplyItem(
-                        action=MessageAction(label=f"{time_str}", text=time_str)
-                    )
-                )
-            
-            # Add Back button
-            items.append(QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")))
-
-            slot_list = "\n".join(
-                [f"🕐 {s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
-            )
-
-            await self.reply_text(
-                reply_token,
-                f"""📅 {date_str}（{wd}） {store_name}
-
-{slot_list}
-
-こちらはいかがでしょうか？
-時間を選択してください👇""",
-                quick_reply=QuickReply(items=items),
-            )
-            return
-
-        # Multiple dates found: Show availability for all
-        msg_lines = []
-        store_name = STORE_NAMES.get(store, store)
-        
-        # --- Time Filter Logic (案2: 時間帯検索) ---
-        filter_start_hour = None
-        filter_end_hour = None
-        filter_note = ""
-        
-        if "午前" in text or "朝" in text:
-            filter_end_hour = 12
-            filter_note = "（午前中）"
-        elif "午後" in text:
-            filter_start_hour = 12
-            filter_note = "（午後）"
-        elif "夜" in text or "夕方" in text:
-            filter_start_hour = 17
-            filter_note = "（17時以降）"
-            
-        m_after = re.search(r"(\d{1,2})時以降", text)
-        if m_after:
-            filter_start_hour = int(m_after.group(1))
-            filter_note = f"（{filter_start_hour}時以降）"
-
-        for td in target_dates:
-            open_slots = get_available_slots(td, store, bookings)
-            
-            # Apply Filter
-            filtered_slots = open_slots
-            if filter_start_hour is not None:
-                filtered_slots = [s for s in filtered_slots if s.hour >= filter_start_hour]
-            if filter_end_hour is not None:
-                filtered_slots = [s for s in filtered_slots if s.hour < filter_end_hour]
-
-            d_str = td.strftime("%m/%d")
-            wd = WEEKDAY_JP[td.weekday()]
-            
-            if filtered_slots:
-                slot_strs = [s.strftime("%H:%M") for s in filtered_slots]
-                if len(slot_strs) > 6:
-                    slot_strs = slot_strs[:6] + ["..."]
-                msg_lines.append(f"📅 {d_str}（{wd}）\n" + "  " + ", ".join(slot_strs))
-            else:
-                # If filtered out completely, don't shown
-                # only show if NO filter was applied and it was full
-                if not (filter_start_hour or filter_end_hour):
-                    msg_lines.append(f"📅 {d_str}（{wd}）: 満席 🈵")
-        
-        if not msg_lines:
-             if filter_start_hour or filter_end_hour:
-                 msg_lines.append("ご希望の時間帯に空きは見つかりませんでした🙇‍♂️")
-             else:
-                 msg_lines.append("ご希望の日程に空きは見つかりませんでした🙇‍♂️")
-
-        final_msg = "\n\n".join(msg_lines)
-        if len(final_msg) > 1000:
-            final_msg = final_msg[:1000] + "\n..."
-            
-        await self.reply_text(
-             reply_token,
-             f"""■ {store_name} の空き状況 {filter_note}
-
-{final_msg}
-
-ご希望の日時（1日）を指定してください！""",
-             quick_reply=QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
-        )
-        # Ensure session is in select_date
-        bookings_data = bookings # keep reference if needed
-        await db.set_session(user_id, "booking", "select_date", json.dumps(data))    # ============================================================
-    # Date query handler
-    # ============================================================
     async def _handle_date_query(
         self, reply_token: str, user_id: str, target_date: datetime
     ):
@@ -976,9 +715,13 @@ class LINEService:
                 store = "hanzoomon"
 
             if not store:
+                requested = self._extract_time(text)
+                if requested and data.get('date'):
+                    data['pending_datetime_text'] = data['date'] + ' ' + ('%02d:%02d' % requested)
+                    await db.set_session(user_id, 'booking', state, json.dumps(data))
                 await self.reply_text(
                     reply_token,
-                    "店舗を選んでください👇",
+                    "📍 ご希望の店舗はどちらですか？😊\n時間のボタンから選ぶこともできます👇",
                     quick_reply=QuickReply(
                         items=[
                             QuickReplyItem(action=MessageAction(label="恵比寿店", text="恵比寿店")),
@@ -1002,50 +745,7 @@ class LINEService:
                 )
                 return
 
-            # We have a date already, show time slots for the chosen store
-            target_date = datetime.strptime(date_str, "%Y-%m-%d")
-            bookings = await self._get_bookings()
-            slots = get_available_slots(target_date, store, bookings)
-
-            d_str = target_date.strftime("%m/%d")
-            wd = WEEKDAY_JP[target_date.weekday()]
-            store_name = STORE_NAMES.get(store, store)
-
-            if not slots:
-                await self.reply_text(
-                    reply_token,
-                    f"😔 {d_str}（{wd}）は{store_name}の空きがありません。\n\n別の日時を入力してください📅",
-                    quick_reply=QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
-                )
-                await db.set_session(user_id, "booking", "select_date", json.dumps(data))
-                return
-
-            await db.set_session(
-                user_id, "booking", "select_time", json.dumps(data)
-            )
-
-            items = []
-            for slot in slots[:13]:
-                time_str = slot.strftime("%H:%M")
-                items.append(
-                    QuickReplyItem(
-                        action=MessageAction(label=f"{time_str}", text=time_str)
-                    )
-                )
-
-            slot_list = "\n".join(
-                [f"🕐 {s.strftime('%H:%M')} - {(s + timedelta(hours=1)).strftime('%H:%M')}" for s in slots]
-            )
-
-            await self.reply_text(
-                reply_token,
-                f"""📅 {d_str}（{wd}） {store_name}
-
-{slot_list}
-
-時間を選択してください👇""",
-                quick_reply=QuickReply(items=items),
-            )
+            await self._process_select_date(reply_token, user_id, session, date_str, data)
 
         elif state == "select_date":
             await self._process_select_date(reply_token, user_id, session, text, data)
@@ -1148,23 +848,11 @@ class LINEService:
                 f"よろしければ「確定」を押してください👇"
             )
 
-            await self.reply_text(
-                reply_token,
-                confirm_msg,
-                quick_reply=QuickReply(
-                    items=[
-                        QuickReplyItem(
-                            action=MessageAction(label="✅ 予約する", text="確定する")
-                        ),
-                        QuickReplyItem(
-                            action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")
-                        ),
-                        QuickReplyItem(
-                            action=MessageAction(label="❌ やめる", text="キャンセル")
-                        ),
-                    ]
-                ),
-            )
+            data['confirmation_id'] = uuid.uuid4().hex
+            await db.set_session(user_id, 'booking', 'confirm', json.dumps(data))
+            action = await db.make_action(user_id, {'a':'picker_confirm','confirmation_id':data['confirmation_id']})
+            confirm_msg = confirm_msg.replace('よろしければ「確定」を押してください👇', 'スタッフ確認前の仮予約です。\n内容がよければ下のボタンを押してください😊')
+            await self.reply_flex(reply_token, '📋 仮予約の内容確認', self._build_confirm_flex('📋 仮予約の内容確認', confirm_msg, '✅ 仮予約を申し込む', action, '#15803D'))
 
         elif state == "resolve_room_conflict":
             if "変更する" in text:
