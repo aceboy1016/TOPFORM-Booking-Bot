@@ -105,6 +105,8 @@ class SheetsService:
                 
                 name = row[0].strip()
                 line_id = row[1].strip()
+                # Customers awaiting LINE registration are not bot users yet.
+                if not line_id: continue
                 ebisu_flag = row[2].strip() if len(row) > 2 else ""
                 hanzomon_flag = row[3].strip() if len(row) > 3 else ""
                 room_raw = row[4].strip() if len(row) > 4 else ""
