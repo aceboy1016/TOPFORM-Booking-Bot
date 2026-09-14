@@ -4,6 +4,7 @@ import pytest
 from tests.test_flows import event, user, future, customer
 from tests.test_conversation import confirm_action
 import line_service as ls
+import booking_actions
 
 
 def buttons(service):
@@ -27,6 +28,7 @@ async def test_inquiry_unavailable_time_then_booking(service, database, monkeypa
     # Both the listing and final availability check use controlled availability.
     monkeypatch.setattr(ls,'get_available_slots',lambda day,store,snapshot: [dt,dt+timedelta(minutes=30)] if store=='hanzoomon' else [])
     monkeypatch.setattr(ls,'check_availability',lambda slot,store,snapshot: {'is_available':store=='hanzoomon' and slot in [dt,dt+timedelta(minutes=30)],'rooms_available':[]})
+    monkeypatch.setattr(booking_actions,'check_availability',ls.check_availability)
     await service.handle_text_message(event('明後日恵比寿で空いてるとこない？'),user())
     await service.handle_text_message(event('金曜日は？'),user())
     assert json.loads((await database.get_session('u'))['flow_data'])['store']=='ebisu'
@@ -48,7 +50,7 @@ async def test_inquiry_unavailable_time_then_booking(service, database, monkeypa
     await service.handle_postback_event(event(data=confirm),user())
     assert len(await database.get_user_bookings('u',True))==1
 
-async def test_pagination_and_stale_card(service,database):
+async def test_pagination_and_reusable_older_card(service,database):
     dt=future()
     await service.handle_text_message(event(f'{dt.month}/{dt.day} 恵比寿空いてる？'),user())
     first=buttons(service)
@@ -58,7 +60,9 @@ async def test_pagination_and_stale_card(service,database):
     old=next(a for a in first if a['label'].startswith('🕐'))
     await service.handle_text_message(event('明日は？'),user())
     await tap(service,old)
-    assert '終了' in service.reply_text.call_args.args[1]
+    session=await database.get_session('u')
+    assert session['flow_state']=='confirm'
+    assert json.loads(session['flow_data'])['date']==dt.strftime('%Y-%m-%d')
     assert await database.get_user_bookings('u',True)==[]
 
 async def test_foreign_button_and_availability_changed(service,database,monkeypatch):
