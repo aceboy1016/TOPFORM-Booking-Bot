@@ -61,7 +61,10 @@ class Database:
     def engine(self):
         if self._engine is None:
             url=self._url or settings.DATABASE_URL or 'sqlite+aiosqlite:///'+self._db_path
-            self._engine=create_async_engine(url,pool_pre_ping=True)
+            # Cloud SQL shared-core has 25 connections; three app instances
+            # may use at most 15, leaving room for reserved/admin connections.
+            options = {'pool_size': 2, 'max_overflow': 3, 'pool_timeout': 15} if url.startswith('postgresql') else {}
+            self._engine=create_async_engine(url,pool_pre_ping=True,**options)
         return self._engine
 
     def insert(self,table):
