@@ -19,6 +19,9 @@ async def flush_notifications(api,limit=5):
                 await db.notification_result(row['id'])
             except Exception as exc: await db.notification_result(row['id'],exc)
             continue
+        if row['kind'].startswith('flex:') and await db.waitlist_state(row['kind'].split(':',1)[1])!='offered':
+            await db.notification_result(row['id'])
+            continue
         # LINE retry keys have a finite deduplication window. Do not automatically
         # resend an uncertain delivery after it has expired.
         if datetime.now(JST)-as_jst(datetime.fromisoformat(row['created_at']))>timedelta(hours=23):
