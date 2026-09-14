@@ -247,6 +247,11 @@ class LINEService:
             user["room_pref"] = customer.get("room_pref")
             user["ambiguous_name"] = customer.get("ambiguous_name",False)
 
+        if is_admin and text in ('承認待ち','予約受付一覧','管理メニュー'):
+            from admin_review import show_pending
+            await show_pending(self,reply_token,user_id)
+            return
+
         # 管理者専用コマンド
         if user_id == settings.ADMIN_USER_ID:
             if text in ["ユーザー一覧", "顧客一覧", "user_list"]:

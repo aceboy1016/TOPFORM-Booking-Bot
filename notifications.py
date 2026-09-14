@@ -28,7 +28,11 @@ async def flush_notifications(api,limit=5):
             await db.notification_result(row['id'],RuntimeError('Manual delivery review required'),manual=True)
             continue
         try:
-            if row['kind'].startswith('flex:'):
+            if row['kind']=='card':
+                contents=json.loads(row['body'])
+                title=contents.get('header',{}).get('contents',[{}])[0].get('text','予約のお知らせ')
+                messages=[FlexMessage(alt_text=title,contents=FlexContainer.from_dict(contents))]
+            elif row['kind'].startswith('flex:'):
                 messages=[FlexMessage(alt_text='空き枠のお知らせ',contents=FlexContainer.from_dict(json.loads(row['body'])))]
             else:
                 messages=[TextMessage(text=row['body'][i:i+4500]) for i in range(0,len(row['body']),4500)]

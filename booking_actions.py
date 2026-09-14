@@ -56,8 +56,13 @@ async def handle_action(service,event,user):
         return
     data=await db.get_action(raw.get('id',''),uid) if raw.get('a')=='action' else None
     if not data:
-        await service.reply_text(token,'⏳ このボタンは期限切れです。\n\n「予約確認」から最新の予約を表示してくださいね😊');return
+        command='承認待ち' if uid==settings.ADMIN_USER_ID else '予約確認'
+        await service.reply_text(token,f'⏳ このボタンは期限切れです。\n\n「{command}」から最新の予約を表示してくださいね😊');return
     action=data.get('a')
+    if action in ('admin_review','admin_pending'):
+        from admin_review import handle
+        await handle(service,token,uid,data)
+        return
     if action == 'waitlist_withdraw':
         changed=await db.withdraw_waitlist(data['wid'],uid)
         await service.reply_text(token,'👌 キャンセル待ちを取り下げました。予約はそのまま残っています。' if changed else '💡 このキャンセル待ちは受付を終了しています。')
