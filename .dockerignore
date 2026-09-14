@@ -41,3 +41,15 @@ wheels/
 ._*
 .Spotlight-V100
 .Trashes
+*.db
+*.sqlite*
+*.log
+*credentials*.json
+service-account*.json
+*.pem
+*.key
+.env.*
+.claude/
+.agent/
+tests/
+backups/

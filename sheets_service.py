@@ -4,6 +4,12 @@ TOPFORM LINE Bot - Google Sheets Service
 """
 
 import json
+import hashlib
+import pytz
+
+class SheetsUnavailable(RuntimeError):
+    pass
+
 from datetime import datetime
 from typing import Optional, Dict, List
 
@@ -29,7 +35,7 @@ class SheetsService:
         creds_json = settings.GOOGLE_CREDENTIALS_JSON
         if not creds_json:
             print("⚠️ GOOGLE_CREDENTIALS_JSON is not set, skipping Sheets init")
-            return
+            raise SheetsUnavailable("Sheets credentials are unavailable")
 
         # Decode base64 if needed
         if not creds_json.startswith("{"):
@@ -49,7 +55,7 @@ class SheetsService:
             self._service = build("sheets", "v4", credentials=credentials)
             print("✅ Google Sheets Service initialized")
         except Exception as e:
-            print(f"❌ Failed to initialize Sheets Service: {e}")
+            raise SheetsUnavailable("Sheets initialization failed") from e
 
     def _get_fresh_service(self):
         """毎回新しいHTTPセッションを生成して長期接続による切断（Broken pipe）を防ぐ"""
@@ -68,9 +74,9 @@ class SheetsService:
         if not self._credentials:
             self.initialize()
             if not self._credentials:
-                return []
+                raise SheetsUnavailable("Sheets credentials are unavailable")
 
-        now = datetime.now()
+        now = datetime.now(pytz.timezone("Asia/Tokyo"))
         if (
             not force_refresh
             and self._cached_data is not None
@@ -80,10 +86,11 @@ class SheetsService:
             return self._cached_data
 
         try:
-            sheet_range = "A2:E"
+            tab = settings.CUSTOMER_SHEET_NAME.replace("\'", "\'\'")
+            sheet_range = f"\'{tab}\'!A2:E" if tab else "A2:E"
             service = self._get_fresh_service()
             if not service:
-                return self._cached_data or []
+                raise SheetsUnavailable("Sheets service is unavailable")
             result = (
                 service.spreadsheets()
                 .values()
@@ -98,6 +105,8 @@ class SheetsService:
                 
                 name = row[0].strip()
                 line_id = row[1].strip()
+                # Customers awaiting LINE registration are not bot users yet.
+                if not line_id: continue
                 ebisu_flag = row[2].strip() if len(row) > 2 else ""
                 hanzomon_flag = row[3].strip() if len(row) > 3 else ""
                 room_raw = row[4].strip() if len(row) > 4 else ""
@@ -123,12 +132,17 @@ class SheetsService:
                     "hanzomon_ok": hanzomon_ok
                 })
             
+            ids = [c["line_id"] for c in customers]
+            if any(not c["name"] or not c["line_id"] for c in customers) or len(ids) != len(set(ids)):
+                raise ValueError("Customer names and unique LINE IDs are required")
+            names = [c['name'].replace(' ','').replace('　','') for c in customers]
+            for customer, name in zip(customers,names):
+                customer['ambiguous_name'] = names.count(name)>1
             self._cached_data = customers
             self._last_fetch = now
             return customers
         except Exception as e:
-            print(f"❌ Failed to fetch customer master: {e}")
-            return self._cached_data or []
+            raise SheetsUnavailable("Customer master could not be verified") from e
 
     def get_customer_by_line_id(self, line_id: str) -> Optional[Dict]:
         """Get customer info by LINE ID."""
@@ -143,17 +157,17 @@ class SheetsService:
         customers = self.fetch_customer_master(force_refresh=True)
         return len(customers)
 
-    def fetch_waitlist(self) -> List[Dict]:
+    def fetch_waitlist(self, all_states: bool = False) -> List[Dict]:
         """キャンセル待ちリストを取得する。"""
         if not self._credentials:
             self.initialize()
-            if not self._credentials: return []
+            if not self._credentials: raise SheetsUnavailable("Sheets credentials are unavailable")
 
         try:
             sheet_range = "キャンセル待ち!A2:G"
             service = self._get_fresh_service()
             if not service:
-                return []
+                raise SheetsUnavailable("Sheets service is unavailable")
             result = (
                 service.spreadsheets().values().get(spreadsheetId=self._sheet_id, range=sheet_range).execute()
             )
@@ -164,8 +178,9 @@ class SheetsService:
                 row_idx = i + 2
                 row_data = row + [""] * (7 - len(row))
                 status = row_data[6].strip()
-                if status == "待機中":
+                if status == "待機中" or all_states:
                     waitlist.append({
+                        "id": hashlib.sha256(json.dumps(row_data[:6], ensure_ascii=False).encode()).hexdigest(),
                         "row_index": row_idx,
                         "registered_at": row_data[0],
                         "date": row_data[1],
@@ -177,17 +192,17 @@ class SheetsService:
                     })
             return waitlist
         except Exception as e:
-            print(f"❌ Failed to fetch waitlist: {e}")
-            return []
+            raise SheetsUnavailable("Waitlist could not be read") from e
 
-    def update_waitlist_status(self, row_index: int, status: str):
+    def update_waitlist_status(self, entry_id: str, status: str):
         """キャンセル待ちのステータスを更新する。"""
-        if not self._credentials:
-            self.initialize()
-            if not self._credentials: return
+        entries = [e for e in self.fetch_waitlist(all_states=True) if e["id"] == entry_id]
+        if len(entries) != 1:
+            raise SheetsUnavailable("Waitlist row is missing or ambiguous")
+        row_index = entries[0]["row_index"]
         try:
             service = self._get_fresh_service()
-            if not service: return
+            if not service: raise SheetsUnavailable("Sheets service is unavailable")
             cell_range = f"キャンセル待ち!G{row_index}"
             body = {"values": [[status]]}
             service.spreadsheets().values().update(
@@ -195,7 +210,7 @@ class SheetsService:
                 valueInputOption="USER_ENTERED", body=body
             ).execute()
         except Exception as e:
-            print(f"❌ Failed to update waitlist status: {e}")
+            raise SheetsUnavailable("Waitlist projection could not be updated") from e
 
 # Singleton instance
 sheets_service = SheetsService()

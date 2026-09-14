@@ -1,52 +1,22 @@
 #!/bin/bash
-# TOPFORM Booking Bot - Deploy Script
-# Usage: ./deploy.sh "コミットメッセージ"
-# Usage: ./deploy.sh (メッセージなしの場合はデフォルトメッセージ)
-
-set -e
-
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
+# Deploy only an already committed, tested checkout. Does not commit or push.
+set -euo pipefail
+PROJECT_ID="topform-booking-bot"
 SERVICE_NAME="topform-booking-bot"
 REGION="asia-northeast1"
-SERVICE_URL="https://topform-booking-bot-622073906655.asia-northeast1.run.app"
-
-echo -e "${YELLOW}🚀 TOPFORM Booking Bot デプロイ開始${NC}"
-echo "================================================"
-
-# 1. Git commit & push
-COMMIT_MSG="${1:-auto: deploy $(date '+%Y-%m-%d %H:%M')}"
-echo -e "\n${YELLOW}📦 Git: コミット & プッシュ${NC}"
-git add -A
-git commit -m "$COMMIT_MSG" || echo "No changes to commit"
-git push
-
-# 2. Deploy to Cloud Run
-echo -e "\n${YELLOW}☁️  Cloud Run: デプロイ中...${NC}"
-gcloud run deploy $SERVICE_NAME --source . --region $REGION --quiet
-
-# 3. Health check
-echo -e "\n${YELLOW}🏥 ヘルスチェック...${NC}"
-sleep 5  # Wait for container startup
-
-HEALTH=$(curl -s "$SERVICE_URL/health" 2>/dev/null)
-
-if echo "$HEALTH" | grep -q '"healthy"'; then
-    echo -e "${GREEN}✅ デプロイ成功！サーバーは正常に稼働中${NC}"
-    echo "$HEALTH" | python3 -m json.tool 2>/dev/null || echo "$HEALTH"
-else
-    echo -e "${RED}❌ ヘルスチェック失敗！ログを確認してください${NC}"
-    echo "Response: $HEALTH"
-    echo ""
-    echo "ログ確認: gcloud run services logs read $SERVICE_NAME --region $REGION --limit 20"
-    exit 1
+cd "$(dirname "$0")"
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "Commit or stash changes before deployment." >&2
+  exit 1
 fi
-
-echo ""
-echo "================================================"
-echo -e "${GREEN}🎉 完了！${NC}"
-echo "Service URL: $SERVICE_URL"
+if [[ "${TOPFORM_DEPLOY_READY:-}" != "yes" ]]; then
+  echo "Complete docs/ROLLOUT.md, then explicitly set TOPFORM_DEPLOY_READY=yes." >&2
+  exit 1
+fi
+PYTHON_BIN="${TOPFORM_PYTHON:-venv/bin/python}"
+"$PYTHON_BIN" -m pytest -q
+gcloud run services describe "$SERVICE_NAME" --project "$PROJECT_ID" --region "$REGION" \
+  --format=json | "$PYTHON_BIN" scripts/check_deploy_config.py
+gcloud run deploy "$SERVICE_NAME" --project "$PROJECT_ID" --region "$REGION" \
+  --source . --no-traffic --tag review --quiet
+echo "Review revision deployed with no default traffic. Verify docs/ROLLOUT.md before promoting."

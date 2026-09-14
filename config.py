@@ -36,6 +36,11 @@ class Settings:
 
     # Database (予約履歴用)
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "./topform_line.db")
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+    ADMIN_API_TOKEN: str = os.getenv("ADMIN_API_TOKEN", "")
+    CUSTOMER_SHEET_NAME: str = os.getenv("CUSTOMER_SHEET_NAME", "")
+    SESSION_TTL_MINUTES: int = 30
+    REQUIRE_PERSISTENT_DB: bool = bool(os.getenv("K_SERVICE"))
 
     # Google Sheets (顧客マスタ)
     GOOGLE_SHEET_ID: str = os.getenv("GOOGLE_SHEET_ID", "17jOb7Jh8xIlsmG9RJjdc0GUKykBVxEVkxpyw92sWkjk")
@@ -54,6 +59,16 @@ class Settings:
             missing.append("LINE_CHANNEL_SECRET")
         if not cls.GOOGLE_CREDENTIALS_JSON:
             missing.append("GOOGLE_CREDENTIALS_JSON")
+        if not cls.ADMIN_USER_ID:
+            missing.append("ADMIN_USER_ID")
+        if not cls.GOOGLE_SHEET_ID:
+            missing.append("GOOGLE_SHEET_ID")
+        if cls.REQUIRE_PERSISTENT_DB and not cls.DATABASE_URL.startswith("postgresql+asyncpg://"):
+            missing.append("DATABASE_URL (persistent PostgreSQL required in Cloud Run)")
+        if cls.REQUIRE_PERSISTENT_DB and len(cls.ADMIN_API_TOKEN) < 32:
+            missing.append("ADMIN_API_TOKEN (32+ characters)")
+        if cls.REQUIRE_PERSISTENT_DB and not cls.CUSTOMER_SHEET_NAME:
+            missing.append("CUSTOMER_SHEET_NAME")
         return missing
 
 
@@ -107,10 +122,16 @@ HOLIDAYS = {
         "2025-10-13", "2025-11-03", "2025-11-23", "2025-11-24",
     ],
     2026: [
-        "2026-01-01", "2026-01-12", "2026-02-11", "2026-02-23", "2026-02-24",
+        "2026-01-01", "2026-01-12", "2026-02-11", "2026-02-23",
         "2026-03-20", "2026-04-29", "2026-05-03", "2026-05-04", "2026-05-05",
         "2026-05-06", "2026-07-20", "2026-08-11", "2026-09-21", "2026-09-22",
         "2026-09-23", "2026-10-12", "2026-11-03", "2026-11-23",
+    ],
+    2027: [
+        "2027-01-01", "2027-01-11", "2027-02-11", "2027-02-23",
+        "2027-03-21", "2027-03-22", "2027-04-29", "2027-05-03",
+        "2027-05-04", "2027-05-05", "2027-07-19", "2027-08-11",
+        "2027-09-20", "2027-09-23", "2027-10-11", "2027-11-03", "2027-11-23",
     ],
 }
 
@@ -141,4 +162,3 @@ STORE_NAMES = {
     "ebisu": "恵比寿店",
     "hanzoomon": "半蔵門店",
 }
-

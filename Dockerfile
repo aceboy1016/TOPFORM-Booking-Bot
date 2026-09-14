@@ -1,22 +1,10 @@
-
-# Use the official lightweight Python image.
-# https://hub.docker.com/_/python
-FROM python:3.12-slim
-
-# Allow statements and log messages to immediately appear in the Knative logs
-ENV PYTHONUNBUFFERED True
-
-# Copy local code to the container image.
-ENV APP_HOME /app
-WORKDIR $APP_HOME
-COPY . ./
-
-# Install production dependencies.
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Run the web service on container startup.
-# We use gunicorn webserver with one worker process and 8 threads.
-# For environments with multiple CPU cores, increase the number of workers
-# to be equal to the cores available.
-# Timeout is set to 0 to disable the timeouts of the workers to allow Cloud Run to handle instance scaling.
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 -k uvicorn.workers.UvicornWorker main:app
+FROM python:3.12.12-slim
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+COPY main.py config.py calendar_service.py sheets_service.py database.py line_service.py ./
+COPY booking_rules.py date_parser.py booking_actions.py booking_view.py async_services.py notifications.py waitlist_service.py ./
+RUN useradd --uid 10001 --create-home app && chown app /app
+USER app
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]
