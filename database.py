@@ -1,6 +1,6 @@
 """Transactional booking requests, expiring sessions and retryable notifications.
 
-SQLite is for local development; production requires a shared PostgreSQL URL.
+SQLite is for local development; production uses shared Firestore or PostgreSQL.
 """
 import json
 import uuid
@@ -262,4 +262,8 @@ class Database:
             return [decode(r) for r in (await conn.execute(select(bookings).where(bookings.c.status=='provisional').order_by(bookings.c.created_at))).mappings()]
 
 
-db=Database()
+if settings.DATABASE_BACKEND == 'firestore':
+    from firestore_database import FirestoreDatabase
+    db = FirestoreDatabase()
+else:
+    db = Database()

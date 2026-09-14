@@ -36,6 +36,9 @@ class Settings:
 
     # Database (予約履歴用)
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "./topform_line.db")
+    DATABASE_BACKEND: str = os.getenv('DATABASE_BACKEND', 'sql')
+    FIRESTORE_PROJECT: str = os.getenv('FIRESTORE_PROJECT', '')
+    FIRESTORE_PREFIX: str = os.getenv('FIRESTORE_PREFIX', 'topform')
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
     ADMIN_API_TOKEN: str = os.getenv("ADMIN_API_TOKEN", "")
     CUSTOMER_SHEET_NAME: str = os.getenv("CUSTOMER_SHEET_NAME", "")
@@ -63,7 +66,11 @@ class Settings:
             missing.append("ADMIN_USER_ID")
         if not cls.GOOGLE_SHEET_ID:
             missing.append("GOOGLE_SHEET_ID")
-        if cls.REQUIRE_PERSISTENT_DB and not cls.DATABASE_URL.startswith("postgresql+asyncpg://"):
+        if cls.DATABASE_BACKEND not in ('sql', 'firestore'):
+            missing.append('DATABASE_BACKEND')
+        if cls.DATABASE_BACKEND == 'firestore' and not cls.FIRESTORE_PROJECT:
+            missing.append('FIRESTORE_PROJECT')
+        if cls.REQUIRE_PERSISTENT_DB and cls.DATABASE_BACKEND == 'sql' and not cls.DATABASE_URL.startswith("postgresql+asyncpg://"):
             missing.append("DATABASE_URL (persistent PostgreSQL required in Cloud Run)")
         if cls.REQUIRE_PERSISTENT_DB and len(cls.ADMIN_API_TOKEN) < 32:
             missing.append("ADMIN_API_TOKEN (32+ characters)")

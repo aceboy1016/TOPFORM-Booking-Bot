@@ -25,7 +25,7 @@ venv/bin/python -m pytest -q
 venv/bin/python -m uvicorn main:app --reload --port 8002
 ```
 
-SQLiteはローカル開発専用です。本番Cloud Runでは`DATABASE_URL=postgresql+asyncpg://...`の共有PostgreSQLが必須です。
+SQLiteはローカル開発専用です。本番Cloud Runは`DATABASE_BACKEND=firestore`、`FIRESTORE_PROJECT`を指定し、無料枠対象の `(default)` DBを使用します。Cloud SQLの常時課金は不要です。無料枠超過時の従量課金はあるため、利用量を確認してください。
 
 ## 主要ファイル
 

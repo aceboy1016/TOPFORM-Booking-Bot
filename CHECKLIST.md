@@ -1,10 +1,10 @@
 # リリース確認
 
-- [ ] `docs/ROLLOUT.md`の移行前提を完了
-- [ ] 本番PostgreSQL・バックアップ・復元試験を確認
+- [ ] `docs/FREE-TIER-MIGRATION.md`の移行前提を完了
+- [ ] 本番Firestore無料枠・削除保護を確認。破壊的変更前にデータ退避・復元手順を確認
 - [ ] 現行仮予約を回収しスタッフと照合
 - [ ] 顧客マスタタブ・本人識別を確認
-- [ ] SQLite/PostgreSQLの全回帰テストが成功
+- [ ] SQLite/Firestoreの全回帰テストが成功
 - [ ] 独立検証環境でLINE全フローを確認
 - [ ] 管理API認証・通知再送Schedulerを設定
 - [ ] キャンセル待ちジョブの停止理由を確認

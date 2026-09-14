@@ -29,7 +29,7 @@ async def test_postgres_import_is_atomic_and_refuses_nonempty_target(database,tm
     from scripts.migrate_database import migrate
     from database import bookings, outbox
     from sqlalchemy import select, func
-    if database.engine.dialect.name!='postgresql':
+    if not hasattr(database,'engine') or database.engine.dialect.name!='postgresql':
         pytest.skip('Requires dedicated PostgreSQL integration database')
     path=source_file(tmp_path)
     result=await migrate(path,database._url)

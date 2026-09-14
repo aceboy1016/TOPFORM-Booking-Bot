@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import select,update
 from database import current_event,bookings,outbox,sessions
 from booking_rules import JST
+from tests.storage_helpers import records, patch_rows
 
 async def test_event_idempotent_save_and_outbox(database):
     token=current_event.set('same-event')
@@ -24,14 +25,12 @@ async def test_failed_notification_remains(database):
     await database.enqueue('key','u','test')
     row=(await database.pending_notifications())[0]
     await database.notification_result(row['id'],RuntimeError())
-    async with database.engine.connect() as c:
-        saved=(await c.execute(select(outbox))).mappings().one()
+    saved=(await records(database,outbox))[0]
     assert saved['state']=='pending' and saved['last_error']=='RuntimeError'
 
 async def test_session_expiry(database):
     await database.set_session('u','booking','confirm','{}')
-    async with database.engine.begin() as c:
-        await c.execute(update(sessions).values(updated_at=(datetime.now(JST)-timedelta(hours=1)).isoformat()))
+    await patch_rows(database,sessions,{'updated_at':(datetime.now(JST)-timedelta(hours=1)).isoformat()})
     assert await database.get_session('u') is None
 
 async def test_action_belongs_to_user(database):
@@ -62,3 +61,23 @@ async def test_review_supersedes_only_after_approval(database):
     assert await database.review_booking(replacement['public_id'],'confirmed','calendar-id')
     assert (await database.get_booking(old,'u'))['status']=='superseded'
     assert not await database.review_booking(replacement['public_id'],'confirmed','calendar-id')
+
+async def test_booking_and_notice_roll_back_together(database,monkeypatch):
+    from config import settings
+    monkeypatch.setattr(settings,'ADMIN_USER_ID','')
+    with pytest.raises(ValueError):
+        await database.save_booking('u','ebisu','2026-10-01T10:00:00+09:00')
+    assert await database.get_user_bookings('u',include_past=True)==[]
+
+async def test_simultaneous_booking_delivery_is_idempotent(database):
+    token=current_event.set('parallel-event')
+    try:
+        ids=await asyncio.gather(*[database.save_booking('u','ebisu','2026-10-01T10:00:00+09:00') for _ in range(2)])
+    finally:current_event.reset(token)
+    assert ids[0]==ids[1]
+    assert len(await database.get_user_bookings('u',include_past=True))==1
+
+async def test_notification_is_claimed_by_only_one_worker(database):
+    await database.enqueue('parallel-notice','u','message')
+    batches=await asyncio.gather(database.pending_notifications(),database.pending_notifications())
+    assert sum(map(len,batches))==1
