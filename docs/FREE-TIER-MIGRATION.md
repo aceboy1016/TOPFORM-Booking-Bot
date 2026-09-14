@@ -1,6 +1,6 @@
 # 固定DB費用の撤廃（2026-09-14）
 
-ユーザーの「無料を基本、発生しても最小限」という指示を優先します。先に導入したCloud SQLはFirestoreへのデータ移行・検証後に撤去します。
+ユーザーの「無料を基本、発生しても最小限」という指示を優先します。先に導入したCloud SQLはFirestoreへのデータ移行・検証後に削除しました。
 
 ## 構成
 
@@ -25,3 +25,13 @@
 ## 費用の範囲
 
 [Firestore公式料金](https://cloud.google.com/firestore/pricing)の無料枠を利用します。Cloud RunやScheduler等の無料枠は請求先アカウントの他の利用状況にも依存します。LINE側のメッセージ契約、すでに発生したCloud SQL利用料、ビルドや保存容量の超過分は別です。ゼロ円の上限保証はしていません。
+
+## 本番適用結果
+
+- 本番リビジョン `topform-booking-bot-free-4477baf` に100%配信。Firestore接続・管理API認証・署名付き空Webhookを確認済み。
+- SQL全7テーブルは各0件。ローカル退避JSONとFirestoreの件数・SHA-256を照合済み。照合値: `29e7f7c7d61a5fafde59a0ffa8948894b5daaedf91fd13524c379388ca629bc7`。
+- 退避ファイルはリポジトリ外の `/Users/junya/projects/topform-deploy-private/sql-final-snapshot.json` に権限600で保存。
+- Cloud SQL削除は2026-09-14 16:27 JSTに完了。最終バックアップ・削除後のバックアップ保持を無効化して削除し、SQLインスタンス一覧が空であることを確認。
+- Cloud RunのSQL接続設定・DB接続Secret・実行アカウントのCloud SQL権限を削除。
+- SQLite: 76成功・3対象外、Firestoreエミュレータ: 78成功・1対象外。GitHub CI成功。実LINEへのテスト通知は送信していない。
+- 本番のLINE全会話フローは独立したLINE検証環境での確認が残る。無料枠は他のプロジェクト利用量も影響し、請求総額0円の保証ではない。

@@ -1,5 +1,7 @@
 # 2026-09-14 本番移行記録
 
+> この文書は先行したSQL移行の履歴です。現在の本番はFirestoreで、Cloud SQLは削除済みです。最新の構成・検証・復旧制約は[無料枠移行記録](FREE-TIER-MIGRATION.md)を参照してください。
+
 状態：本番トラフィックを `topform-booking-bot-reliable-b58f99b` へ100%切り替え済み。旧リビジョン `topform-booking-bot-00106-m54` は削除せず保持。
 
 ## インフラ
