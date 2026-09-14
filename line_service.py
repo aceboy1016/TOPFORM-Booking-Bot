@@ -422,10 +422,10 @@ class LINEService:
             if 0 <= hour <= 23 and 0 <= minute <= 59:
                 return hour, minute
 
-        m = re.search(r"(\d{1,2})時(?:(\d{1,2})分)?", text)
+        m = re.search(r"(\d{1,2})時(?:(\d{1,2})分)?(半)?", text)
         if m:
             hour = int(m.group(1))
-            minute = int(m.group(2)) if m.group(2) else 0
+            minute = 30 if m.group(3) else int(m.group(2)) if m.group(2) else 0
             if 0 <= hour <= 23 and 0 <= minute <= 59:
                 return hour, minute
 
@@ -441,9 +441,10 @@ class LINEService:
         if not target_dates:
             await self.reply_text(
                 reply_token,
-                """日時が正しくありません。
-もう一度入力してください
-(例: 2/20, 明日, 土曜)""",
+                """📅 ご希望の日を教えてください😊
+「明日」「来週の土曜」「9/26」など、普段の言い方で大丈夫です。
+
+新しい予約なら「予約したい」、途中の操作をやめるなら「やめる」と送ってくださいね。""",
                 quick_reply=QuickReply(items=[QuickReplyItem(action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る"))])
             )
             return
