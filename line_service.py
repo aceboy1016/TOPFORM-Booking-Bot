@@ -3,7 +3,12 @@ TOPFORM LINE Bot - LINE Service
 LINEメッセージの処理と予約フローの管理
 """
 
+import asyncio
 import json
+from async_services import google_call
+from booking_rules import parse_slot, REASONS
+from date_parser import parse_dates
+
 import re
 from datetime import datetime, timedelta
 from typing import Optional
@@ -53,6 +58,7 @@ class LINEService:
         self._handler: Optional[WebhookHandler] = None
         self._cached_bookings: Optional[BookingData] = None
         self._cache_time: Optional[datetime] = None
+        self._bookings_lock = asyncio.Lock()
         self._cache_ttl = timedelta(minutes=1)  # 1分キャッシュ (5分から短縮)
 
     async def initialize(self):
@@ -69,17 +75,17 @@ class LINEService:
     def handler(self):
         return self._handler
 
-    async def _get_bookings(self) -> BookingData:
-        """Get calendar bookings with caching."""
-        now = datetime.now(JST)
-        if (
-            self._cached_bookings is None
-            or self._cache_time is None
-            or now - self._cache_time > self._cache_ttl
-        ):
-            self._cached_bookings = calendar_service.fetch_all_bookings()
-            self._cache_time = now
-        return self._cached_bookings
+    async def _get_bookings(self, force=False) -> BookingData:
+        async with self._bookings_lock:
+            now = datetime.now(JST)
+            if force or self._cached_bookings is None or self._cache_time is None or now-self._cache_time>self._cache_ttl:
+                snapshot = await google_call(calendar_service.fetch_all_bookings)
+                self._cached_bookings = snapshot
+                self._cache_time = datetime.now(JST)
+            return self._cached_bookings
+
+    async def close(self):
+        if self._api_client: await self._api_client.close()
 
     def _invalidate_cache(self):
         """Invalidate the booking cache."""
@@ -92,7 +98,7 @@ class LINEService:
     async def get_user_profile(self, user_id: str) -> str:
         """Get user's display name from LINE."""
         try:
-            profile = await self._api.get_profile(user_id)
+            profile = await self._api.get_profile(user_id, _request_timeout=20)
             return profile.display_name
         except Exception:
             return "ゲスト"
@@ -111,7 +117,7 @@ class LINEService:
         await self._api.reply_message(
             ReplyMessageRequest(
                 reply_token=reply_token, messages=[message]
-            )
+            ), _request_timeout=20
         )
 
     async def reply_flex(
@@ -123,13 +129,13 @@ class LINEService:
             contents=FlexContainer.from_dict(flex_content),
         )
         await self._api.reply_message(
-            ReplyMessageRequest(reply_token=reply_token, messages=[message])
+            ReplyMessageRequest(reply_token=reply_token, messages=[message]), _request_timeout=20
         )
 
     async def reply_messages(self, reply_token: str, messages: list):
         """Send multiple messages."""
         await self._api.reply_message(
-            ReplyMessageRequest(reply_token=reply_token, messages=messages)
+            ReplyMessageRequest(reply_token=reply_token, messages=messages), _request_timeout=20
         )
 
     async def push_text(self, to_user_id: str, text: str):
@@ -210,446 +216,10 @@ class LINEService:
             }
         }
 
-    async def handle_postback_event(self, event, user: dict):
-        """Handle postback events (button clicks)."""
-        data = json.loads(event.postback.data)
-        action = data.get("a") or data.get("action")
-        user_id = event.source.user_id
-        reply_token = event.reply_token
+    async def handle_postback_event(self,event,user):
+        from booking_actions import handle_action
+        await handle_action(self,event,user)
 
-        print(f"DEBUG: handle_postback_event - action: {action}, user_id: {user_id}")
-        print(f"DEBUG: data: {data}")
-
-        # --- Gatekeeper Check (Check if registered in Spreadsheet) ---
-        customer = sheets_service.get_customer_by_line_id(user_id)
-        is_admin = (user_id == settings.ADMIN_USER_ID)
-        
-        if not customer and not is_admin:
-            pending_msg = (
-                "【登録手続き中です】\n\n"
-                "友だち追加ありがとうございます！\n"
-                "現在、スタッフがシステムへの登録作業を行っております。\n\n"
-                "設定が完了しましたら石原より改めてご連絡いたしますので、それまで少々お待ちくださいませ。🙇‍♂️\n\n"
-                "※ご自身のIDを確認されたい場合は「ID確認」と送信してください。"
-            )
-            await self.reply_text(reply_token, pending_msg)
-            return
-
-        # Enrich user info (only if customer exists in spreadsheet)
-        if customer:
-            user["display_name"] = customer["name"]
-            user["store_pref"] = customer.get("store_pref")
-            user["room_pref"] = customer.get("room_pref")
-
-        # --- 共通処理: 残り時間計算用関数 ---
-        def get_hours_remaining(booking_dt_iso: str) -> float:
-            if not booking_dt_iso:
-                return 999.0
-            try:
-                booking_dt = datetime.fromisoformat(booking_dt_iso)
-                if booking_dt.tzinfo is None:
-                    booking_dt = JST.localize(booking_dt)
-                
-                now = datetime.now(JST)
-                diff = booking_dt - now
-                return diff.total_seconds() / 3600.0
-            except Exception:
-                return 999.0
-
-        # --- Action Handlers ---
-
-        if action == "force_cancel_confirm" or action == "ticket_consume_confirm":
-            # 最終確認「はい」が押された場合
-            # force_cancel_confirm: 3時間未満（直前キャンセル・管理者通知）
-            # ticket_consume_confirm: 12時間未満（1回消化キャンセル）
-            
-            booking_id = data.get("bid") or data.get("booking_id")
-            booking_date = data.get("date")
-            store_name = data.get("store")
-            old_dt_iso = data.get("d") or data.get("dt_iso") or data.get("dt") 
-
-            # Cancel in DB
-            success = await db.cancel_booking(booking_id, user_id)
-            
-            if success:
-                # Notify User
-                msg_user = ""
-                if action == "force_cancel_confirm":
-                    msg_user = (
-                        f"承知いたしました。\n"
-                        f"直前キャンセルの旨、担当（石原）に通知いたしました。\n"
-                        f"またのご予約をお待ちしております。"
-                    )
-                else:
-                     msg_user = (
-                        f"✅ 予約のキャンセル申請を受け付けました。\n"
-                        f"（規定により1回分消化扱いとなります）\n\n"
-                        f"📅 {booking_date}\n"
-                        f"📍 {store_name}\n\n"
-                        f"またのご予約をお待ちしております！👋"
-                    )
-                
-                await self.reply_text(reply_token, msg_user)
-                
-                # Notify Admin
-                if settings.ADMIN_USER_ID:
-                    display_name = user.get("display_name", "Unknown")
-                    admin_msg = ""
-                    
-                    if action == "force_cancel_confirm":
-                         admin_msg = (
-                            f"🚨 直前キャンセル連絡\n"
-                            f"From: {display_name} 様\n"
-                            f"予約: {booking_date}\n"
-                            f"店舗: {store_name}\n"
-                            f"------------------\n"
-                            f"※{settings.URGENT_CONTACT_DEADLINE_HOURS}時間以内の操作のため、\n"
-                            f"キャンセル扱いとして通知されました。"
-                        )
-                    else:
-                        admin_msg = (
-                            f"🎫 1回消化キャンセル\n"
-                            f"From: {display_name} 様\n"
-                            f"予約: {booking_date}\n"
-                            f"店舗: {store_name}\n"
-                            f"------------------\n"
-                            f"※{settings.BOOKING_DEADLINE_HOURS}時間以内のキャンセルのため、\n"
-                            f"チケット1回分消化扱いとなります。"
-                        )
-
-                    try:
-                        await self.push_text(settings.ADMIN_USER_ID, admin_msg)
-                    except Exception as e:
-                        print(f"Admin notification failed: {e}")
-                
-                self._invalidate_cache()
-            else:
-                await self.reply_text(
-                    reply_token,
-                    "⚠️ エラーが発生しました。すでにキャンセルされている可能性があります。"
-                )
-
-
-        elif action == "cancel_request":
-            booking_id = data.get("bid") or data.get("booking_id")
-            booking_date = data.get("date") 
-            store_name = data.get("store")
-            booking_dt_iso = data.get("d") or data.get("dt_iso") or data.get("dt")
-            hours_remain = get_hours_remaining(booking_dt_iso)
-
-            # Case A: 3時間未満 (直前キャンセル)
-            if hours_remain < settings.URGENT_CONTACT_DEADLINE_HOURS:
-                confirm_data = json.dumps({
-                    "action": "force_cancel_confirm",
-                    "booking_id": booking_id,
-                    "date": booking_date,
-                    "store": store_name,
-                    "dt_iso": booking_dt_iso
-                })
-                
-                msg = (
-                    f"⚠️ 予約時間の{settings.URGENT_CONTACT_DEADLINE_HOURS}時間を切っています。\n\n"
-                    f"これ以降の変更はキャンセル扱いとなります。\n"
-                    f"その旨、担当（石原）に通知しますがよろしいでしょうか？"
-                )
-                
-                flex = self._build_confirm_flex(
-                    "⚠️ 直前キャンセルの確認", 
-                    msg, 
-                    "はい、連絡する", 
-                    confirm_data,
-                    "#cc0000"
-                )
-                await self.reply_flex(reply_token, "直前キャンセルの確認", flex)
-                return
-
-            # Case B: 12時間未満 (チケット消化)
-            elif hours_remain < settings.BOOKING_DEADLINE_HOURS:
-                confirm_data = json.dumps({
-                    "action": "ticket_consume_confirm",
-                    "booking_id": booking_id,
-                    "date": booking_date,
-                    "store": store_name,
-                    "dt_iso": booking_dt_iso
-                })
-                
-                msg = (
-                    f"大変心苦しいのですが、予約時間の{settings.BOOKING_DEADLINE_HOURS}時間を切っておりますため、\n"
-                    f"今回のキャンセルは規定により\n"
-                    f"**【チケット1回分の消化】** となってしまいます🥺\n\n"
-                    f"それでもよろしいでしょうか？\n"
-                    f"（よろしければキャンセル手続きを進めます）"
-                )
-
-                flex = self._build_confirm_flex(
-                    "⚠️ チケット消化の確認", 
-                    msg, 
-                    "はい、キャンセルする", 
-                    confirm_data,
-                    "#FF9800" # Orange
-                )
-                await self.reply_flex(reply_token, "チケット消化の確認", flex)
-                return
-
-            # Case C: 12時間以上 (通常キャンセル)
-            success = await db.cancel_booking(booking_id, user_id)
-            
-            if success:
-                # Notify User
-                await self.reply_text(
-                    reply_token,
-                    f"✅ 予約のキャンセル申請を受け付けました。\n\n"
-                    f"📅 {booking_date}\n"
-                    f"📍 {store_name}\n\n"
-                    f"またのご予約をお待ちしております！👋"
-                )
-                
-                # Notify Admin
-                if settings.ADMIN_USER_ID:
-                    display_name = user.get("display_name", "Unknown")
-                    admin_msg = (
-                        f"🗑️ 予約キャンセル申請\n"
-                        f"👤 {display_name}\n"
-                        f"📅 {booking_date}\n"
-                        f"📍 {store_name}\n"
-                        f"🎫 No. {booking_id}\n"
-                    )
-                    try:
-                        await self.push_text(settings.ADMIN_USER_ID, admin_msg)
-                    except Exception as e:
-                        print(f"Admin notification failed: {e}")
-                
-                self._invalidate_cache()
-            else:
-                await self.reply_text(
-                    reply_token,
-                    "⚠️ すでにキャンセルされているか、予約が見つかりませんでした。"
-                )
-
-        elif action == "activate_user":
-            # Admin only: Notify a user that their registration is complete
-            target_uid = data.get("uid")
-            if user_id != settings.ADMIN_USER_ID:
-                await self.reply_text(reply_token, "⚠️ この操作は許可されていません。")
-                return
-
-            # Welcome Message for the User
-            welcome_msg = (
-                "お待たせいたしました！\n"
-                "予約専用ボットの設定が完了いたしました。✨\n\n"
-                "画面下のメニューから、24時間いつでも以下の操作が可能です。\n\n"
-                "📅 予約早見表: 最新の空き状況を確認\n"
-                "✅ 予約する: 日時を選んで送信するだけ！\n"
-                "📋 予約確認: 次の予定をいつでもチェック\n"
-                "🔄 予約変更: 変更やキャンセルもこちらから\n\n"
-                "※操作後、カレンダーへの反映に1分ほどお時間をいただく場合がございます。\n\n"
-                "もし改善点などがございましたら、お手数ですがこちらの公式LINEへお気軽にご連絡くださいませ。\n"
-                "よろしくお願い申し上げます。🙇‍♂️"
-            )
-
-            try:
-                await self.push_text(target_uid, welcome_msg)
-                await self.reply_text(reply_token, f"✅ 通知を送信しました。")
-            except Exception as e:
-                await self.reply_text(reply_token, f"❌ 送信に失敗しました: {e}")
-                
-        elif action == "waitlist_accept":
-            booking_date = data.get("date")
-            booking_time = data.get("time")
-            store_name = data.get("store")
-            display_name = user.get("display_name", "Unknown")
-            
-            # User response
-            await self.reply_text(
-                reply_token,
-                f"ありがとうございます！🎉\n\n"
-                f"📅 {booking_date} {booking_time}\n"
-                f"📍 {store_name}\n\n"
-                f"こちらの枠ですね。担当（石原）に通知しました。\n"
-                f"まもなくカレンダーに本予約を登録し、確定メッセージをお送りしますので少々お待ちください！"
-            )
-            
-            # Admin notification
-            if settings.ADMIN_USER_ID:
-                admin_msg = (
-                    f"✅ 【予約受付】\n\n"
-                    f"キャンセル待ちのお客様が空き枠を【承諾】しました！\n"
-                    f"登録完了した予約を受け付けました。\n\n"
-                    f"👤 {display_name} 様\n"
-                    f"📅 {booking_date} {booking_time}\n"
-                    f"📍 {store_name}\n\n"
-                    f"※hacomonoやカレンダーへの本予約登録をお願いします！"
-                )
-                try:
-                    await self.push_text(settings.ADMIN_USER_ID, admin_msg)
-                except Exception as e:
-                    print(f"Admin notification failed: {e}")
-                    
-        elif action == "waitlist_decline":
-            await self.reply_text(reply_token, "承知いたしました。\n今回はお見送りということで承りました。\nまたのご予約をお待ちしております！👋")
-            
-            # Admin notification
-            if settings.ADMIN_USER_ID:
-                display_name = user.get("display_name", "Unknown")
-                booking_date = data.get("date", "不明")
-                booking_time = data.get("time", "不明")
-                store_name = data.get("store", "不明")
-                
-                admin_msg = (
-                    f"⏩ 【スルー（見送り）】\n\n"
-                    f"キャンセル待ちのお客様が空き枠を見送りました（スルー）。\n\n"
-                    f"👤 {display_name} 様\n"
-                    f"📅 {booking_date} {booking_time}\n"
-                    f"📍 {store_name}"
-                )
-                try:
-                    await self.push_text(settings.ADMIN_USER_ID, admin_msg)
-                except Exception as e:
-                    print(f"Admin notification failed: {e}")
-
-        if action == "change_list_more":
-            offset = data.get("off") or data.get("offset", 0)
-            await self._show_booking_change_list(reply_token, user_id, user, offset)
-
-        if action == "select_change_booking" or action == "scb":
-            # 予約変更ボタンが押されたとき
-            booking_id = data.get("bid") or data.get("booking_id")
-            b_type = data.get("t") or data.get("type")
-            original_dt_iso = data.get("d") or data.get("dt") # ISO format
-            original_store = data.get("store") or "不明な店舗"
-            
-            print(f"DEBUG: scb - bid: {booking_id}, type: {b_type}, dt: {original_dt_iso}")
-            
-            hours_remain = get_hours_remaining(original_dt_iso)
-            
-            # Case A: 3時間未満
-            if hours_remain < settings.URGENT_CONTACT_DEADLINE_HOURS:
-                # Format date for display
-                dt_display = original_dt_iso
-                try:
-                    dt_obj = datetime.fromisoformat(original_dt_iso)
-                    dt_display = dt_obj.strftime('%m/%d %H:%M')
-                except: pass
-
-                confirm_data = json.dumps({
-                    "a": "force_cancel_confirm",
-                    "bid": booking_id,
-                    "date": dt_display,
-                    "store": original_store,
-                    "d": original_dt_iso
-                })
-
-                msg = (
-                    f"⚠️ 予約時間の{settings.URGENT_CONTACT_DEADLINE_HOURS}時間を切っているため、日時の変更はできません。\n\n"
-                    f"このまま手続きを進めると「キャンセル扱い」となります。\n"
-                    f"その旨、担当（石原）に通知しますがよろしいでしょうか？"
-                )
-                
-                flex = self._build_confirm_flex(
-                    "⚠️ 変更不可・キャンセル確認", 
-                    msg, 
-                    "はい、連絡する", 
-                    confirm_data,
-                    "#cc0000"
-                )
-                await self.reply_flex(reply_token, "直前キャンセルの確認", flex)
-                return
-
-            # Case B: 12時間未満
-            elif hours_remain < settings.BOOKING_DEADLINE_HOURS:
-                # Format date for display
-                dt_display = original_dt_iso
-                try:
-                    dt_obj = datetime.fromisoformat(original_dt_iso)
-                    dt_display = dt_obj.strftime('%m/%d %H:%M')
-                except: pass
-
-                confirm_data = json.dumps({
-                    "a": "ticket_consume_confirm",
-                    "bid": booking_id,
-                    "date": dt_display,
-                    "store": original_store,
-                    "d": original_dt_iso
-                })
-
-                msg = (
-                    f"⚠️ 予約時間の{settings.BOOKING_DEADLINE_HOURS}時間を切っているため、予約変更はできません。\n\n"
-                    f"一度キャンセル（1回分消化）してから取り直す形になりますが、よろしいでしょうか？"
-                )
-                
-                flex = self._build_confirm_flex(
-                    "⚠️ 変更不可・チケット消化", 
-                    msg, 
-                    "はい、キャンセルする", 
-                    confirm_data,
-                    "#FF9800"
-                )
-                await self.reply_flex(reply_token, "チケット消化の確認", flex)
-                return
-
-            # Normal Change Flow
-            original_dt = original_dt_iso
-            
-            # Format original date/time for display
-            dt_display = ""
-            if original_dt:
-                try:
-                    dt_obj = datetime.fromisoformat(original_dt)
-                    wd = WEEKDAY_JP[dt_obj.weekday()]
-                    dt_display = f"{dt_obj.strftime('%m/%d')}（{wd}） {dt_obj.strftime('%H:%M')}"
-                except:
-                    dt_display = original_dt
-
-            session_data = {
-                "mode": "change",
-                "target_booking_id": booking_id,
-                "target_booking_type": b_type,
-                # Carry over user preferences
-                "room_pref": user.get("room_pref"),
-                "original_booking_info": {
-                    "dt": original_dt,
-                    "store": original_store
-                }
-            }
-            
-            await db.set_session(user_id, "booking", "select_store", json.dumps(session_data))
-            
-            # Store selection QuickReply
-            quick_reply = QuickReply(
-                items=[
-                    QuickReplyItem(
-                        action=MessageAction(label="恵比寿", text="恵比寿店")
-                    ),
-                    QuickReplyItem(
-                        action=MessageAction(label="半蔵門", text="半蔵門店")
-                    ),
-                    QuickReplyItem(
-                        action=MessageAction(label="両店舗", text="両店舗")
-                    ),
-                    QuickReplyItem(
-                        action=MessageAction(label="⬅️ 戻る", text="⬅️ 戻る")
-                    ),
-                ]
-            )
-            
-            # 1. Confirmation Message
-            confirm_text = "承知しました。以下の予約を変更しますね。\n"
-            if dt_display:
-                confirm_text += f"\n📅 {dt_display}"
-                if original_store:
-                    confirm_text += f"\n ・{original_store}"
-                
-                confirm_text += "\n\n↓↓↓↓↓"
-            
-            # 2. Prompt for new store (or same store)
-            prompt_text = "変更後の店舗を選んでください！\n（日時だけ変更する場合も、店舗を選んでください）"
-            
-            await self.reply_text(reply_token, confirm_text + "\n" + prompt_text, quick_reply=quick_reply)
-            return
-
-    # ============================================================
-    # Main message handler
-    # ============================================================
     async def handle_text_message(self, event, user: dict):
         """Handle incoming text message."""
         text = event.message.text.strip()
@@ -658,33 +228,22 @@ class LINEService:
 
         if text.lower() in ["id", "id確認", "user_id", "admin_id", "uid"]:
             await self.reply_text(reply_token, f"あなたのUser ID:\n{user_id}")
-            print(f"🆔 User ID: {user_id}")
+
             return
 
         # --- Gatekeeper Check (Check if registered in Spreadsheet) ---
-        customer = sheets_service.get_customer_by_line_id(user_id)
+        customer = await google_call(sheets_service.get_customer_by_line_id,user_id)
         is_admin = (user_id == settings.ADMIN_USER_ID)
 
         if not customer and not is_admin:
-            # Allow common pleasantries but block main features
-            if any(word in text for word in ["予約", "確認", "変更", "早見表"]):
-                pending_msg = (
-                    "【登録手続き中です】\n\n"
-                    "現在、スタッフがシステムへの登録作業を行っております。\n\n"
-                    "設定が完了しましたら石原より改めてご連絡いたしますので、それまで少々お待ちください。🙇‍♂️\n\n"
-                    "※ご自身のIDを確認されたい場合は「ID確認」と送信してください。"
-                )
-                await self.reply_text(reply_token, pending_msg)
-                return
-            
-            # For other text, Gemini might handle it or we can just show a muted response
-            # But during test phase, it's safer to maintain the gatekeeper for everything
-            # except specific ID commands.
+            await self.reply_text(reply_token,"登録が完了してからご利用ください。ID確認は「ID確認」と送信してください。")
+            return
 
         if customer:
             user["display_name"] = customer["name"]
             user["store_pref"] = customer.get("store_pref")
             user["room_pref"] = customer.get("room_pref")
+            user["ambiguous_name"] = customer.get("ambiguous_name",False)
 
         # 管理者専用コマンド
         if user_id == settings.ADMIN_USER_ID:
@@ -699,7 +258,7 @@ class LINEService:
                 for u in users[:10]: # Limit for Flex Carousel
                     name = u.get("display_name", "Unknown")
                     uid = u.get("line_user_id", "")
-                    customer = sheets_service.get_customer_by_line_id(uid)
+                    customer = await google_call(sheets_service.get_customer_by_line_id,uid)
                     status = "✅ 登録済" if customer else "⚠️ 未登録"
                     
                     bubble = {
@@ -741,20 +300,31 @@ class LINEService:
                 return
 
             if text in ["キャッシュ更新", "更新", "reload", "refresh"]:
-                count = sheets_service.force_refresh()
+                count = await google_call(sheets_service.force_refresh)
                 await self.reply_text(
                     reply_token,
                     f"✅ 顧客マスタを再読み込みしました。\n登録済み顧客数: {count}名"
                 )
                 return
 
-        if text == "キャンセル" or text == "やめる":
+        if text in ("キャンセル", "やめる", "操作をやめる"):
             await db.clear_session(user_id)
             await self.reply_text(reply_token, "操作をキャンセルしました。")
             return
 
         # Check for active session
         session = await db.get_session(user_id)
+
+        if "店舗変更" in text:
+            if session and session.get('flow_type')=='booking':
+                data=json.loads(session.get('flow_data','{}'))
+                for key in ('store','date','time','room','pending_time','was_both'):
+                    data.pop(key,None)
+                await db.set_session(user_id,'booking','select_store',json.dumps(data))
+                await self.reply_text(reply_token,'店舗を選択してください。恵比寿店・半蔵門店・両店舗から選べます。')
+            else:
+                await self._start_booking_flow(reply_token,user_id,user,force_store_select=True)
+            return
 
         # ---- Rich Menu / Command triggers ----
         if "予約確認" in text or "予約一覧" in text or "マイ予約" in text:
@@ -795,8 +365,17 @@ class LINEService:
         # ---- 自然言語解析: 「○日空いてる？」----
         dates = self._parse_multiple_dates(text)
         if dates:
-            for d in dates:
-                await self._handle_date_query(reply_token, user_id, d)
+            snapshot=await self._get_bookings()
+            lines=[]
+            for d in dates[:31]:
+                parts=[]
+                for store,name in STORE_NAMES.items():
+                    slots=get_available_slots(d,store,snapshot)
+                    parts.append(name+': '+(', '.join(x.strftime('%H:%M') for x in slots) or '空きなし'))
+                lines.append(d.strftime('%m/%d')+'\n'+'\n'.join(parts))
+            content='\n\n'.join(lines)
+            messages=[TextMessage(text=content[i:i+4500]) for i in range(0,len(content),4500)]
+            await self.reply_messages(reply_token,messages[:5])
             return
 
         # ---- 挨拶・労いへの返信 ----
@@ -826,22 +405,10 @@ class LINEService:
             f"スタッフが確認後、確定メッセージをお送りします。\n\n"
             f"以下よりメニューをお選びください。"
         )
-        await self.reply_text(event.reply_token, welcome)
-
-        # 管理者に新規友だち追加を通知（LINE User IDを含む）
         if settings.ADMIN_USER_ID and user_id != settings.ADMIN_USER_ID:
-            try:
-                admin_msg = (
-                    f"👤 新規友だち追加\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"名前: {display_name}\n"
-                    f"LINE ID: {user_id}\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"↑ このIDを顧客マスタシートのB列にコピーしてください"
-                )
-                await self.push_text(settings.ADMIN_USER_ID, admin_msg)
-            except Exception as e:
-                print(f"Admin follow notification failed: {e}")
+            await db.enqueue('follow:'+user_id, settings.ADMIN_USER_ID,
+                f'新規友だち追加\n名前: {display_name}\nLINE ID: {user_id}\n顧客マスタへの登録を確認してください。')
+        await self.reply_text(event.reply_token, welcome)
 
     # ============================================================
     # Date query parsing
@@ -866,113 +433,8 @@ class LINEService:
 
         return None
 
-    def _parse_multiple_dates(self, text: str) -> list[datetime]:
-        """
-        Parse natural language text for multiple dates.
-        Examples:
-          「2/20, 2/21空いてる？」「2日と23日」「3月の土曜日」「3月」
-        """
-        found_dates = []
-        now = datetime.now(JST)
-        import calendar
-
-        # 0. Detect explicit Month context (e.g. "3月")
-        target_month_context = None
-        target_year_context = now.year
-        
-        m_month = re.search(r"(\d{1,2})月", text)
-        if m_month:
-            try:
-                m_val = int(m_month.group(1))
-                if 1 <= m_val <= 12:
-                    target_month_context = m_val
-                    if target_month_context < now.month:
-                        target_year_context += 1
-            except:
-                pass
-
-        # 1. Keywords
-        if "今日" in text: found_dates.append(now)
-        if "明日" in text: found_dates.append(now + timedelta(days=1))
-        if "明後日" in text or "あさって" in text: found_dates.append(now + timedelta(days=2))
-
-        # 2. Weekdays
-        weekday_map = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
-        
-        # If month context exists, search for "X曜" in that month
-        if target_month_context:
-            detected_wds = []
-            for wd_char, wd_idx in weekday_map.items():
-                if f"{wd_char}曜" in text:
-                    detected_wds.append(wd_idx)
-            
-            if detected_wds:
-                _, last_day = calendar.monthrange(target_year_context, target_month_context)
-                for day in range(1, last_day + 1):
-                    dt = JST.localize(datetime(target_year_context, target_month_context, day))
-                    if dt.date() >= now.date() and dt.weekday() in detected_wds:
-                        found_dates.append(dt)
-
-        # "来週X曜" (Relative)
-        for m in re.finditer(r"来週\s*([月火水木金土日])", text):
-            target_wd = weekday_map[m.group(1)]
-            days_ahead = (7 - now.weekday() + target_wd) % 7
-            if days_ahead == 0: days_ahead = 7
-            days_ahead += 7
-            found_dates.append(now + timedelta(days=days_ahead))
-
-        # "[今週]X曜" - Only if NO month context
-        if not target_month_context:
-            text_no_next = re.sub(r"来週\s*[月火水木金土日]", "", text)
-            for m in re.finditer(r"(?:今週\s*)?([月火水木金土日])曜", text_no_next):
-                target_wd = weekday_map[m.group(1)]
-                days_ahead = (target_wd - now.weekday()) % 7
-                if days_ahead == 0: days_ahead = 7
-                found_dates.append(now + timedelta(days=days_ahead))
-
-        # 3. M/D pattern
-        for m in re.finditer(r"(\d{1,2})[/月.](\d{1,2})", text):
-            try:
-                month = int(m.group(1))
-                day = int(m.group(2))
-                year = now.year
-                target = JST.localize(datetime(year, month, day))
-                if target.date() < now.date():
-                    target = target.replace(year=year + 1)
-                found_dates.append(target)
-            except:
-                pass
-
-        # 4. D日 pattern
-        text_temp = re.sub(r"\d{1,2}[/月]\d{1,2}", "", text)
-        for m in re.finditer(r"(\d{1,2})日", text_temp):
-            try:
-                day = int(m.group(1))
-                year = now.year
-                month = now.month
-                target = JST.localize(datetime(year, month, day))
-                if target.date() < now.date():
-                    month += 1
-                    if month > 12: month = 1; year += 1
-                    target = JST.localize(datetime(year, month, day))
-                found_dates.append(target)
-            except:
-                pass
-        
-        # 5. Month only fallback
-        if target_month_context and not found_dates:
-            _, last_day = calendar.monthrange(target_year_context, target_month_context)
-            for day in range(1, last_day + 1):
-                dt = JST.localize(datetime(target_year_context, target_month_context, day))
-                if dt.date() >= now.date():
-                    found_dates.append(dt)
-
-        # Sort and unique
-        unique_map = {}
-        for d in found_dates:
-            unique_map[d.date()] = d
-        
-        return sorted(list(unique_map.values()))
+    def _parse_multiple_dates(self,text):
+        return parse_dates(text,datetime.now(JST))
 
     async def _process_select_date(self, reply_token, user_id, session, text, data):
         """Handle date selection logic, supporting multiple dates."""
@@ -1410,7 +872,10 @@ class LINEService:
                 return
             elif state == "select_date":
                 # Back to Store Selection
-                await self._start_booking_flow(reply_token, user_id, user, force_store_select=True)
+                for key in ('store','date','time','room','pending_time','was_both'):
+                    data.pop(key,None)
+                await db.set_session(user_id,'booking','select_store',json.dumps(data))
+                await self.reply_text(reply_token,'変更後の店舗を選択してください。恵比寿店・半蔵門店・両店舗から選べます。')
                 return
             elif state == "select_store_after_date":
                 # Back to Date Selection
@@ -1423,6 +888,7 @@ class LINEService:
                 # Back to Date selection OR Store selection after date
                 if data.get("was_both"):
                     # Transition back to picking store after date
+                    data["store"]="both"
                     await self._process_select_date(reply_token, user_id, session, data.get("date"), data)
                 else:
                     await db.set_session(user_id, "booking", "select_date", json.dumps(data))
@@ -1720,6 +1186,12 @@ class LINEService:
                 return
 
             elif "で予約" in text:
+                selected = re.search(r"個室([AB])",text)
+                snapshot=await self._get_bookings(force=True)
+                availability=check_availability(parse_slot(data['date'],data['pending_time']),data['store'],snapshot)
+                if not selected or not availability['is_available'] or selected[1] not in availability.get('rooms_available',[]):
+                    await self.reply_text(reply_token,'この個室は現在利用できません。別の日時を選んでください。')
+                    return
                 pending_time_str = data.get("pending_time")
                 data["time"] = pending_time_str
                 
@@ -1768,7 +1240,7 @@ class LINEService:
                 )
 
         elif state == "confirm":
-            if "確定" in text or "はい" in text or "OK" in text.upper():
+            if text.strip().upper() in ("確定", "確定する", "はい", "OK", "予約する"):
                 mode = data.get("mode", "booking")
                 target_id = data.get("target_booking_id")
                 target_type = data.get("target_booking_type")
@@ -1777,27 +1249,26 @@ class LINEService:
                 date_str = data.get("date")
                 time_str = data.get("time")
                 
-                # Format datetime
-                if len(time_str) == 5:
-                    slot_datetime = f"{date_str}T{time_str}:00+09:00"
-                else:
-                    slot_datetime = f"{date_str}T{time_str}+09:00"
-
-                # Save booking as provisional (仮予約)
-                room_info = data.get("room") or data.get("room_pref")
-                metadata = {"room": room_info} if room_info else None
-                
-                # 1. Cancel old booking if in change mode
-                if mode == "change" and target_type == "db" and target_id:
-                    try:
-                        await db.cancel_booking(target_id)
-                    except Exception as e:
-                        print(f"Failed to cancel old booking: {e}")
-
-                # 2. Save new booking
-                booking_id = await db.save_booking(
-                    user_id, store, slot_datetime, "provisional", metadata
-                )
+                slot=parse_slot(date_str,time_str)
+                snapshot=await self._get_bookings(force=True)
+                result=check_availability(slot,store,snapshot)
+                if not result['is_available']:
+                    await self.reply_text(reply_token,REASONS.get(result.get('reason'),'この枠は現在利用できません。'))
+                    return
+                room_info=data.get('room')
+                if room_info and store=='ebisu' and room_info not in result.get('rooms_available',[]):
+                    await self.reply_text(reply_token,'選択した個室が埋まりました。時間を選び直してください。')
+                    return
+                slot_datetime=slot.isoformat()
+                metadata={'customer_name':user.get('display_name',''), 'room':room_info}
+                if mode=='change':
+                    from booking_actions import resolve_booking, cancel_band
+                    original=await resolve_booking(self,user_id,user,target_type,target_id)
+                    if not original or original['dt']<=datetime.now(JST) or cancel_band(original['dt'])!='normal':
+                        await self.reply_text(reply_token,'元の予約の状態または変更期限が変わりました。予約変更の一覧からやり直してください。')
+                        return
+                    metadata['change_from']={'id':original['id'],'type':original['type'],'dt':original['dt'].isoformat(),'store':original['store']}
+                booking_id=await db.save_booking(user_id,store,slot_datetime,'provisional',metadata)
 
                 # Clear session
                 await db.clear_session(user_id)
@@ -1893,65 +1364,7 @@ class LINEService:
 
                 await self.reply_text(reply_token, success_msg, quick_reply=quick_reply)
                 
-                # Notify Admin (single notification)
-                if settings.ADMIN_USER_ID:
-                    display_name = user.get("display_name", "Unknown")
-                    
-                    if mode == "change":
-                        original_info = data.get("original_booking_info", {})
-                        print(f"DEBUG: original_info from session: {original_info}") # Debug log
-                        orig_dt_str = original_info.get("dt", "")
-                        orig_store = original_info.get("store", "")
-                        
-                        orig_text = ""
-                        if orig_dt_str:
-                            try:
-                                odt = datetime.fromisoformat(orig_dt_str)
-                                owd = WEEKDAY_JP[odt.weekday()]
-                                orig_text = (
-                                    f"\n▼ 変更前\n"
-                                    f" ・{odt.strftime('%m/%d')}（{owd}） {odt.strftime('%H:%M')}-\n"
-                                    f" ・{orig_store}\n\n"
-                                    f"↓↓↓↓↓\n\n"
-                                    f"▼ 変更後"
-                                )
-                            except:
-                                pass
-
-                        admin_msg = (
-                            f"🔄 予約変更リクエスト\n"
-                            f"👤 {display_name}\n"
-                            f"{orig_text}\n"
-                            f" ・{display_date}（{wd}）{hour:02d}:{minute:02d}-\n"
-                            f" ・{store_display}\n\n"
-                            f"⚠️ カレンダーを確認して更新してください！"
-                        )
-                    elif mode == "change_OLD_UNUSED":
-
-                        admin_msg = (
-                            f"🔄 予約変更リクエスト\n"
-                            f"👤 {display_name}\n"
-                            f"📅 {display_date}（{wd}）\n"
-                            f"� {time_range}\n"
-                            f"📍 {store_display}\n\n"
-                            f"⚠️ カレンダーを確認して更新してください！"
-                        )
-                    else:
-                        admin_msg = (
-                            f"🆕 新規予約リクエスト\n"
-                            f"👤 {display_name}\n\n"
-                            f"↓↓↓↓↓\n\n"
-                            f"▼ 予約内容\n"
-                            f" ・{display_date}（{wd}）{hour:02d}:{minute:02d}-\n"
-                            f" ・{store_display}\n"
-                            f" ・No. {booking_id}\n\n"
-                            f"⚠️ hacomono/カレンダーに登録してください！"
-                        )
-                        
-                    try:
-                        await self.push_text(settings.ADMIN_USER_ID, admin_msg)
-                    except Exception as e:
-                        print(f"Admin notification failed: {e}")
+                # The admin notification was committed atomically with the request.
 
             elif "キャンセル" in text or "やめ" in text:
                 await db.clear_session(user_id)
@@ -1976,226 +1389,9 @@ class LINEService:
     # ============================================================
     # Show user bookings (Flex Message)
     # ============================================================
-    async def _show_user_bookings(
-        self, reply_token: str, user_id: str, user: dict
-    ):
-        """Show the user's upcoming bookings with cancel options."""
-        # Get from local DB (Provisional/Confirmed)
-        upcoming = await db.get_user_bookings(user_id, include_past=False)
-        
-        # Calendar bookings (Legacy/Manual)
-        display_name = user.get("display_name", "")
-        cal_bookings = []
-        if display_name and display_name != "Unknown":
-            bookings = await self._get_bookings()
-            cal_bookings = find_user_bookings(display_name, bookings)
-            # Filter future only
-            now = datetime.now(JST)
-            cal_bookings = [b for b in cal_bookings if b.start_dt > now]
+    async def _show_user_bookings(self,reply_token,user_id,user):
+        await self._show_user_bookings_simple(reply_token,user_id,user)
 
-        if not upcoming and not cal_bookings:
-            await self.reply_text(
-                reply_token,
-                "📖 現在の予約はありません。\n\n「予約する」で新しい予約を入れましょう！📅",
-            )
-            return
-
-        # Build Flex Message Bubble for each booking
-        bubbles = []
-
-        # 1. DB Bookings
-        for b in upcoming:
-            dt = datetime.fromisoformat(b["slot_datetime"])
-            date_s = dt.strftime("%m/%d")
-            wd = WEEKDAY_JP[dt.weekday()]
-            time_s = dt.strftime("%H:%M")
-            
-            # Metadata parsing
-            metadata = b.get("metadata", {})
-            room = metadata.get("room") if metadata else None
-            store_name = STORE_NAMES.get(b["store"], b["store"])
-            if room:
-                store_name += f" [個室{room}]"
-                
-            status_text = "仮予約" if b.get("status") == "provisional" else "予約中"
-            status_color = "#ff9f1c" if b.get("status") == "provisional" else "#2ec4b6"
-            
-            bubbles.append({
-                "type": "bubble",
-                "size": "mega",
-                "header": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": status_text,
-                            "color": "#ffffff",
-                            "weight": "bold",
-                            "size": "xs",
-                            "backgroundColor": status_color,
-                            "paddingAll": "3px",
-                            "cornerRadius": "sm",
-                            "align": "start",
-                            "flex": 0,
-                            "offsetTop": "-5px"
-                        },
-                        {
-                            "type": "text",
-                            "text": f"{date_s} ({wd})",
-                            "weight": "bold",
-                            "size": "xl",
-                            "color": "#1a1a2e",
-                            "margin": "sm"
-                        },
-                        {
-                            "type": "text",
-                            "text": f"{time_s} 〜",
-                            "size": "lg",
-                            "color": "#1a1a2e",
-                        }
-                    ],
-                    "backgroundColor": "#f8f9fa"
-                },
-                "body": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "box",
-                            "layout": "baseline",
-                            "contents": [
-                                {"type": "text", "text": "📍", "flex": 1, "size": "sm"},
-                                {"type": "text", "text": store_name, "flex": 8, "size": "sm", "weight": "bold"}
-                            ]
-                        },
-                        {
-                            "type": "box",
-                            "layout": "baseline",
-                            "margin": "md",
-                            "contents": [
-                                {"type": "text", "text": "🎫", "flex": 1, "size": "sm"},
-                                {"type": "text", "text": f"No. {b['id']}", "flex": 8, "size": "xs", "color": "#aaaaaa"}
-                            ]
-                        }
-                    ],
-                    "paddingAll": "20px"
-                },
-                "footer": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "button",
-                            "action": {
-                                "type": "postback",
-                                "label": "キャンセル申請",
-                                "data": json.dumps({
-                                    "a": "cancel_request",
-                                    "bid": b["id"],
-                                    "date": f"{date_s} {time_s}",
-                                    "store": store_name,
-                                    "d": dt.isoformat()
-                                })
-                            },
-                            "style": "secondary",
-                            "color": "#e63946",
-                            "height": "sm"
-                        }
-                    ],
-                    "paddingAll": "15px"
-                }
-            })
-
-        # 2. Calendar Bookings (Cannot cancel automatically, show distinct)
-        for b in cal_bookings:
-            dt = b.start_dt
-            date_s = dt.strftime("%m/%d")
-            wd = WEEKDAY_JP[dt.weekday()]
-            time_s = dt.strftime("%H:%M")
-            store_name = STORE_NAMES.get(b.store, "")
-            if b.room:
-                store_name += f" [個室{b.room}]"
-            
-            bubbles.append({
-                "type": "bubble",
-                "size": "mega",
-                "header": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": "カレンダー同期",
-                            "color": "#ffffff",
-                            "weight": "bold",
-                            "size": "xs",
-                            "backgroundColor": "#cccccc",
-                            "paddingAll": "3px",
-                            "cornerRadius": "sm",
-                            "align": "start",
-                            "flex": 0,
-                            "offsetTop": "-5px"
-                        },
-                        {
-                            "type": "text",
-                            "text": f"{date_s} ({wd})",
-                            "weight": "bold",
-                            "size": "xl",
-                            "color": "#1a1a2e",
-                            "margin": "sm"
-                        },
-                        {
-                            "type": "text",
-                            "text": f"{time_s} 〜",
-                            "size": "lg",
-                            "color": "#1a1a2e",
-                        }
-                    ],
-                    "backgroundColor": "#f0f0f0"
-                },
-                "body": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "box",
-                            "layout": "baseline",
-                            "contents": [
-                                {"type": "text", "text": "📍", "flex": 1, "size": "sm"},
-                                {"type": "text", "text": store_name, "flex": 8, "size": "sm", "weight": "bold"}
-                            ]
-                        }
-                    ],
-                    "paddingAll": "20px"
-                },
-                "footer": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                         {
-                            "type": "text",
-                            "text": "※変更は直接ご連絡ください",
-                            "size": "xs",
-                            "color": "#aaaaaa",
-                            "align": "center"
-                        }
-                    ],
-                    "paddingAll": "15px"
-                }
-            })
-
-        # Create Carousel
-        carousel = {
-            "type": "carousel",
-            "contents": bubbles
-        }
-
-        await self.reply_flex(reply_token, "あなたの予約一覧", carousel)
-
-    # ============================================================
-    # Hayamihyo link
-    # ============================================================
     async def _show_hayamihyo_link(self, reply_token: str):
         """Show link to the booking web page (早見表)."""
         flex = {
@@ -2399,188 +1595,32 @@ class LINEService:
     # ============================================================
     # Show user bookings (Simple Text)
     # ============================================================
-    async def _show_user_bookings_simple(
-        self, reply_token: str, user_id: str, user: dict
-    ):
-        """Show the user's upcoming bookings with monthly usage count."""
-        now = datetime.now(JST)
+    async def _show_user_bookings_simple(self,reply_token,user_id,user):
+        from booking_view import user_bookings
+        entries=await user_bookings(self,user_id,user,include_past=True)
+        now=datetime.now(JST)
+        completed=sum(b['status']=='confirmed' and b['dt'].year==now.year and b['dt'].month==now.month and b['dt']+timedelta(hours=1)<=now for b in entries)
+        future=[b for b in entries if b['dt']>now]
+        lines=[f'今月の利用済み: {completed}回','予約一覧（仮予約は利用回数に含みません）']
+        for b in future[:20]:
+            mark='【仮】' if b['status']=='provisional' else ''
+            lines.append(b['dt'].strftime('%m/%d %H:%M')+' '+STORE_NAMES.get(b['store'],b['store'])+mark)
+        if not future: lines.append('現在の予約はありません。')
+        if len(future)>20: lines.append(f'ほか{len(future)-20}件。予約変更の一覧で確認できます。')
+        lines.append('変更・取消は「予約変更」と入力してください。')
+        await self.reply_text(reply_token,'\n'.join(lines))
 
-        # ── 1. 今月の過去利用回数をカレンダーから取得 ──────────────────
-        display_name = user.get("display_name", "")
-        past_count_this_month = 0
-
-        if display_name and display_name != "Unknown":
-            try:
-                past_cal = calendar_service.fetch_user_past_bookings_this_month(display_name)
-                past_count_this_month = len(past_cal)
-            except Exception as e:
-                print(f"月次集計エラー: {e}")
-
-        # 今日の分（DB: confirmed当日分）も今月カウントに含める
-        all_db = await db.get_user_bookings(user_id, include_past=True)
-        today_start = JST.localize(now.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None))
-
-        # 今日の0時〜今の時刻の間に終わった予約（DB）を今月済みにカウント
-        db_past_today = [
-            b for b in all_db
-            if today_start <= datetime.fromisoformat(b["slot_datetime"]) <= now
-            and b.get("status") != "cancelled"
-        ]
-        past_count_this_month += len(db_past_today)
-
-        # ── 2. これからの予約（DB + カレンダー）を取得 ──────────────────
-        upcoming = await db.get_user_bookings(user_id, include_past=False)
-
-        cal_bookings = []
-        if display_name and display_name != "Unknown":
-            bookings = await self._get_bookings()
-            cal_bookings = find_user_bookings(display_name, bookings)
-            cal_bookings = [b for b in cal_bookings if b.start_dt > now]
-
-        if not upcoming and not cal_bookings:
-            # 予約なし、でも今月の利用回数は表示
-            usage_line = ""
-            if past_count_this_month > 0:
-                usage_line = f"📊 今月の利用: {past_count_this_month}回\n\n"
-            await self.reply_text(
-                reply_token,
-                f"{usage_line}📖 現在の予約はありません。\n\n「予約する」で新しい予約を入れましょう！📅",
-            )
-            return
-
-        # ── 3. 今月の今後の予約も集計してカウントアップ ───────────────
-        # 今月内の予約にだけ「今月○回目」を付ける
-        all_display_bookings = []
-
-        # DB分
-        for b in upcoming:
-            dt = datetime.fromisoformat(b["slot_datetime"])
-            metadata = b.get("metadata", {})
-            room = metadata.get("room") if metadata else None
-            store_name = STORE_NAMES.get(b["store"], b["store"])
-            if room:
-                store_name += f"（個室{room}）"
-            status_mark = "【仮】" if b.get("status") == "provisional" else ""
-            all_display_bookings.append({
-                "dt": dt,
-                "store": store_name,
-                "mark": status_mark,
-            })
-
-        # カレンダー分
-        for b in cal_bookings:
-            dt = b.start_dt
-            store_name = STORE_NAMES.get(b.store, "")
-            if b.room:
-                store_name += f"（個室{b.room}）"
-            all_display_bookings.append({
-                "dt": dt,
-                "store": store_name,
-                "mark": "",
-            })
-
-        # 日付順ソート
-        all_display_bookings.sort(key=lambda x: x["dt"])
-
-        # ── 4. 今月分に「今月○回目」を付与 ─────────────────────────────
-        this_month_year = (now.year, now.month)
-        counter = past_count_this_month  # 過去分から引き継ぎ
-
-        msg_lines = ["📖 予約一覧\n"]
-
-        # 今月の利用サマリー行
-        future_this_month = [
-            b for b in all_display_bookings
-            if (b["dt"].year, b["dt"].month) == this_month_year
-        ]
-        total_this_month = past_count_this_month + len(future_this_month)
-
-        if total_this_month > 0 or past_count_this_month > 0:
-            msg_lines.append(f"📊 今月の利用: {past_count_this_month}回 / 予定: {total_this_month}回\n")
-
-        display_limit = 15
-        for item in all_display_bookings[:display_limit]:
-            dt = item["dt"]
-            wd = WEEKDAY_JP[dt.weekday()]
-            line = f"📅 {dt.strftime('%m/%d')}（{wd}）{dt.strftime('%H:%M')} | {item['store']}{item['mark']}"
-
-            # 今月の予約には「今月○回目」を付与
-            if (dt.year, dt.month) == this_month_year:
-                counter += 1
-                line += f"  ← 今月{counter}回目"
-
-            msg_lines.append(line)
-
-        if len(all_display_bookings) > display_limit:
-            msg_lines.append(f"\n...他 {len(all_display_bookings) - display_limit}件")
-
-        msg_lines.append("\n変更する場合は「予約変更」と入力してください🔄")
-
-        await self.reply_text(reply_token, "\n".join(msg_lines))
-
-
-    # ============================================================
-    # Show booking list for modification (Carousel with Pagination)
-    # ============================================================
     async def _show_booking_change_list(
         self, reply_token: str, user_id: str, user: dict, offset: int = 0
     ):
         """Show future bookings in a carousel to select which one to change."""
         
-        # 1. Fetch ALL future bookings (DB + Calendar)
-        upcoming = await db.get_user_bookings(user_id, include_past=False)
-        
-        display_name = user.get("display_name", "")
-        cal_bookings = []
-        if display_name and display_name != "Unknown":
-            bookings = await self._get_bookings()
-            cal_bookings = find_user_bookings(display_name, bookings)
-            # Filter future only
-            now = datetime.now(JST)
-            cal_bookings = [b for b in cal_bookings if b.start_dt > now]
-
-        # 2. Unify format
-        all_bookings = []
-        
-        # DB
-        for b in upcoming:
-            dt = datetime.fromisoformat(b["slot_datetime"])
-            metadata = b.get("metadata", {})
-            room = metadata.get("room") if metadata else None
-            store_name = STORE_NAMES.get(b["store"], b["store"])
-            if room:
-                store_name += f"（個室{room}）"
-            
-            all_bookings.append({
-                "type": "db",
-                "id": b["id"],
-                "dt": dt,
-                "store": store_name,
-                "status": b.get("status")
-            })
-            
-        # Calendar
-        for b in cal_bookings:
-            dt = b.start_dt
-            store_name = STORE_NAMES.get(b.store, "")
-            if b.room:
-                store_name += f"（個室{b.room}）"
-                
-            all_bookings.append({
-                "type": "cal",
-                "id": b.id or "cal",
-                "dt": dt,
-                "store": store_name,
-                "status": "confirmed"
-            })
-            
-        # Sort
-        all_bookings.sort(key=lambda x: x["dt"])
-        
+        from booking_view import user_bookings
+        all_bookings=await user_bookings(self,user_id,user)
         if not all_bookings:
-             await self.reply_text(reply_token, "変更可能な予約はありません。")
-             return
-
+            await self.reply_text(reply_token,'変更可能な予約はありません。')
+            return
+        offset=max(0,min(offset,max(0,len(all_bookings)-1)))
         # 3. Pagination Logic
         # Max bubbles = 12 (Official Line limit)
         # If we have more items than fit in one carousel, we use the last bubble for "More"
@@ -2629,7 +1669,7 @@ class LINEService:
                     "contents": [
                         {
                             "type": "text",
-                            "text": f"{b['store']}",
+                            "text": STORE_NAMES.get(b["store"],b["store"]),
                             "size": "sm",
                             "color": "#666666",
                             "wrap": True
@@ -2646,13 +1686,7 @@ class LINEService:
                             "action": {
                                 "type": "postback",
                                 "label": "🔄 該当する日時を変更",
-                                "data": json.dumps({
-                                    "a": "scb",
-                                    "bid": b["id"],
-                                    "t": b["type"],
-                                    "d": b["dt"].isoformat(),
-                                    "store": b["store"]
-                                })
+                                "data": await db.make_action(user_id,{"a":"scb","bid":b["id"],"t":b["type"]})
                             },
                             "style": "secondary",
                             "height": "sm"
@@ -2661,8 +1695,9 @@ class LINEService:
                     "paddingAll": "10px"
                 }
             }
+            bubble['footer']['contents'].append({'type':'button','action':{'type':'postback','label':'予約を取り消す','data':await db.make_action(user_id,{'a':'cancel_request','bid':b['id'],'t':b['type']})},'style':'secondary','height':'sm'})
             bubbles.append(bubble)
-            
+
         # 5. Add "More" Bubble if needed
         if has_more:
             bubbles.append({
@@ -2752,7 +1787,7 @@ class LINEService:
             # Determine store
             store = "ebisu"  # default
             if store_raw:
-                if "半蔵門" in store_raw or "hanzomon" in store_raw.lower():
+                if "半蔵門" in store_raw or store_raw.lower() in ("hanzomon","hanzoomon"):
                     store = "hanzoomon"
                 else:
                     store = "ebisu"
@@ -2772,65 +1807,30 @@ class LINEService:
         
         return entries
 
-    async def _handle_bulk_booking(self, reply_token: str, user_id: str, user: dict, entries: list[dict]):
-        """
-        Handle bulk booking requests from 早見表 format.
-        Creates provisional bookings for each entry and notifies admin.
-        """
-        results = []
-        booking_ids = []
-        
+    async def _handle_bulk_booking(self,reply_token,user_id,user,entries):
+        if len(entries)>20:
+            await self.reply_text(reply_token,'一度に指定できる予約は20件までです。');return
+        snapshot=await self._get_bookings(force=True)
+        results=[];seen=set()
         for entry in entries:
-            date_str = entry["date_str"]
-            time_str = entry["time_str"]
-            store = entry["store"]
-            display = entry["display"]
-            
-            # Build ISO datetime
-            slot_datetime = f"{date_str}T{time_str}:00+09:00"
-            
-            # Save as provisional booking
             try:
-                room_pref = user.get("room_pref")
-                metadata = {"room": room_pref} if room_pref else None
-                booking_id = await db.save_booking(
-                    user_id, store, slot_datetime, "provisional", metadata
-                )
-                results.append(f"✅ {display}（No.{booking_id}）")
-                booking_ids.append(booking_id)
-            except Exception as e:
-                print(f"Bulk booking error: {e}")
-                results.append(f"❌ {display}（エラー）")
-        
+                slot=parse_slot(entry['date_str'],entry['time_str'])
+                end=parse_slot(entry['date_str'],entry['end_time'])
+                if end-slot!=timedelta(hours=1): raise ValueError('1枠60分で指定してください。')
+                key=(slot,entry['store'])
+                if key in seen: continue
+                seen.add(key)
+                result=check_availability(slot,entry['store'],snapshot)
+                if not result['is_available']: raise ValueError(REASONS.get(result.get('reason'),'空きがありません。'))
+                room=user.get('room_pref')
+                if entry['store']!='ebisu' or room not in result.get('rooms_available',[]): room=None
+                bid=await db.save_booking(user_id,entry['store'],slot.isoformat(),'provisional',{'room':room,'customer_name':user.get('display_name','')})
+                results.append(f"受付 No.{bid}: {slot.strftime('%m/%d %H:%M')} {STORE_NAMES[entry['store']]}")
+            except ValueError as exc:
+                results.append(f"受付不可 {entry['date_str']} {entry['time_str']}: {exc}")
+        await db.clear_session(user_id)
         self._invalidate_cache()
-        
-        # Build user response message
-        results_text = "\n".join(results)
-        display_name = user.get("display_name", "ゲスト")
-        
-        user_msg = (
-            f"📋 仮予約を一括で受け付けました！\n\n"
-            f"{results_text}\n\n"
-            f"※ まだ予約は確定ではありません。\n"
-            f"スタッフが確認後、確定のご連絡をいたします📩"
-        )
-        
-        await self.reply_text(reply_token, user_msg)
-        
-        # Notify Admin
-        if settings.ADMIN_USER_ID:
-            admin_msg = (
-                f"🆕 一括予約リクエスト\n"
-                f"👤 {display_name}\n\n"
-                f"↓↓↓↓↓\n\n"
-                f"▼ 予約内容（{len(booking_ids)}件）\n"
-                f"{results_text}\n\n"
-                f"⚠️ hacomono/カレンダーに登録してください！"
-            )
-            try:
-                await self.push_text(settings.ADMIN_USER_ID, admin_msg)
-            except Exception as e:
-                print(f"Admin bulk notification failed: {e}")
+        await self.reply_text(reply_token,'仮予約の受付結果\n'+'\n'.join(results)+'\nスタッフ確認後に確定します。')
 
 
 # Singleton instance

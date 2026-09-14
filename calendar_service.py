@@ -14,6 +14,11 @@ import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+from booking_rules import as_jst, booking_limit, slot_error, hours_for
+
+class CalendarUnavailable(RuntimeError):
+    """A complete, current calendar snapshot could not be obtained."""
+
 from config import (
     settings,
     CALENDAR_IDS,
@@ -49,6 +54,8 @@ class Booking:
     title: str
     description: str = ""
     room: Optional[str] = None  # 'A', 'B', or None (unknown)
+    all_day: bool = False
+    customer_id: str = ""
     source: Optional[str] = None  # 'work', 'private', 'ebisu', 'hanzoomon'
 
 
@@ -67,29 +74,8 @@ class CalendarService:
         self._service = None
         self._credentials = None
         self._consecutive_errors = 0  # 連続エラー回数
+        self.last_success = None
         self._error_notified = False  # 通知済みフラグ（連続エラー中の重複通知防止）
-
-    def _notify_admin_error(self, message: str):
-        """カレンダーAPIエラーを管理者LINEに通知する（同期）。"""
-        try:
-            import urllib.request
-            admin_id = settings.ADMIN_USER_ID
-            token = settings.LINE_CHANNEL_ACCESS_TOKEN
-            if not admin_id or not token:
-                return
-            body = json.dumps({
-                "to": admin_id,
-                "messages": [{"type": "text", "text": message}]
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                "https://api.line.me/v2/bot/message/push",
-                data=body,
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-                method="POST"
-            )
-            urllib.request.urlopen(req, timeout=5)
-        except Exception as e:
-            print(f"⚠️ Admin notification failed: {e}")
 
     async def initialize(self):
         """Async wrapper for initialization."""
@@ -132,7 +118,7 @@ class CalendarService:
     ) -> list[dict]:
         """Fetch events from a single calendar."""
         if not self._credentials:
-            return []
+            raise CalendarUnavailable("Calendar credentials are unavailable")
         try:
             # 毎回新しいHTTPセッションを生成して長期接続による切断を防ぐ
             # timeout必須: 未指定だと応答が無い場合に無限待機し、ワーカー1個のCloud Runでは
@@ -142,25 +128,18 @@ class CalendarService:
                 self._credentials, http=httplib2.Http(timeout=GOOGLE_API_TIMEOUT)
             )
             service = build("calendar", "v3", http=http)
-            result = (
-                service.events()
-                .list(
-                    calendarId=calendar_id,
-                    timeMin=time_min,
-                    timeMax=time_max,
-                    singleEvents=True,
-                    orderBy="startTime",
-                    maxResults=2500,
-                )
-                .execute()
-            )
-            self._consecutive_errors = 0
-            self._error_notified = False
-            return result.get("items", [])
-        except Exception as e:
-            print(f"❌ Failed to fetch events from {calendar_id}: {e}")
-            self._consecutive_errors += 1
-            return []
+            events, page_token = [], None
+            while True:
+                result = service.events().list(
+                    calendarId=calendar_id, timeMin=time_min, timeMax=time_max,
+                    singleEvents=True, orderBy="startTime", maxResults=2500,
+                    pageToken=page_token,
+                ).execute()
+                events.extend(result.get("items", []))
+                page_token = result.get("nextPageToken")
+                if not page_token: return events
+        except Exception as exc:
+            raise CalendarUnavailable("Calendar snapshot is incomplete") from exc
 
     def _transform_event(self, event: dict, store: str, source: str = "work") -> Optional[Booking]:
         """Convert Google Calendar event to Booking object."""
@@ -173,23 +152,25 @@ class CalendarService:
         # Handle start/end time parsing
         try:
             if start.get("dateTime"):
-                 start_dt = datetime.fromisoformat(start["dateTime"])
+                 start_dt = as_jst(datetime.fromisoformat(start["dateTime"]))
             elif start.get("date"):
                 # All-day event logic
-                if any(k in title for k in BLOCKING_KEYWORDS):
-                    start_dt = datetime.strptime(start["date"], "%Y-%m-%d").replace(tzinfo=JST)
+                if any(k in title for k in BLOCKING_KEYWORDS + [UNAVAILABLE_KEYWORD]):
+                    start_dt = JST.localize(datetime.strptime(start["date"], "%Y-%m-%d"))
                 else:
                     return None # Ignore non-blocking all-day
             else:
                 return None
 
             if end.get("dateTime"):
-                end_dt = datetime.fromisoformat(end["dateTime"])
+                end_dt = as_jst(datetime.fromisoformat(end["dateTime"]))
             elif end.get("date"):
-                end_dt = datetime.strptime(end["date"], "%Y-%m-%d").replace(tzinfo=JST)
-                if not any(k in title for k in BLOCKING_KEYWORDS):
+                end_dt = JST.localize(datetime.strptime(end["date"], "%Y-%m-%d"))
+                if not any(k in title for k in BLOCKING_KEYWORDS + [UNAVAILABLE_KEYWORD]):
                      return None # Ignore non-blocking
 
+            if end_dt <= start_dt:
+                raise ValueError("Invalid event interval")
             # Parse Room (Ebisu only)
             room = None
             if store == "ebisu":
@@ -206,10 +187,12 @@ class CalendarService:
                 title=title,
                 description=desc,
                 room=room,
+                all_day=bool(start.get("date")),
+                customer_id=event.get("extendedProperties", {}).get("private", {}).get("line_user_id", ""),
                 source=source
             )
-        except (ValueError, TypeError):
-            return None
+        except (ValueError, TypeError, UnboundLocalError) as exc:
+            raise CalendarUnavailable("Invalid calendar event dates") from exc
 
     def fetch_all_bookings(self) -> BookingData:
         """Fetch all bookings from all calendars."""
@@ -217,28 +200,24 @@ class CalendarService:
             # Assumed caller awaited initialize() already, or fallback to sync
             self.initialize_sync()
             if not self._service:
-                return BookingData(ebisu=[], hanzoomon=[], ishihara=[])
+                raise CalendarUnavailable("Calendar is not initialized")
 
         now = datetime.now(JST)
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
         time_min = today.isoformat()
-        time_max = (today + timedelta(days=ADVANCE_BOOKING_MONTHS * 30)).isoformat()
+        time_max = (booking_limit(now) + timedelta(minutes=SESSION_DURATION + TRAVEL_TIME)).isoformat()
 
-        # Fetch raw events（エラーカウントをリセットして計測開始）
+        try:
+            ebisu_events = self._fetch_events(CALENDAR_IDS["ebisu"], time_min, time_max)
+            hanzomon_events = self._fetch_events(CALENDAR_IDS["hanzoomon"], time_min, time_max)
+            work_events = self._fetch_events(CALENDAR_IDS["ishihara_work"], time_min, time_max)
+            private_events = self._fetch_events(CALENDAR_IDS["ishihara_private"], time_min, time_max)
+        except CalendarUnavailable:
+            self._consecutive_errors += 1
+            # Health exposes the failure; notification delivery is handled by the outbox.
+            raise
         self._consecutive_errors = 0
-        ebisu_events = self._fetch_events(CALENDAR_IDS["ebisu"], time_min, time_max)
-        hanzomon_events = self._fetch_events(CALENDAR_IDS["hanzoomon"], time_min, time_max)
-        work_events = self._fetch_events(CALENDAR_IDS["ishihara_work"], time_min, time_max)
-        private_events = self._fetch_events(CALENDAR_IDS["ishihara_private"], time_min, time_max)
-
-        # 全カレンダーが失敗している場合に管理者へ通知
-        if self._consecutive_errors >= 4 and not self._error_notified:
-            self._error_notified = True
-            self._notify_admin_error(
-                "⚠️ [TOPFORM Bot] Googleカレンダーへの接続が失敗しています。\n"
-                "予約確認・空き確認が正常に動作していない可能性があります。\n"
-                "しばらく待っても改善しない場合はサーバーの再起動をお試しください。"
-            )
+        self.last_success = datetime.now(JST)
 
         # Transform
         ebisu_bookings = []
@@ -255,9 +234,9 @@ class CalendarService:
         for ev in work_events:
             # Detect store from title
             store = "unknown"
-            title = ev.get("summary", "")
-            if "(半)" in title or "（半）" in title: store = "hanzoomon"
-            elif "(恵)" in title or "（恵）" in title: store = "ebisu"
+            title = " ".join(str(ev.get(k, "")) for k in ("summary", "location", "description"))
+            if any(x in title for x in ("(半)", "（半）", "半蔵門")): store = "hanzoomon"
+            elif any(x in title for x in ("(恵)", "（恵）", "恵比寿")): store = "ebisu"
             
             b = self._transform_event(ev, store, "work")
             if b: ishihara_bookings.append(b)
@@ -273,7 +252,7 @@ class CalendarService:
             last_update=datetime.now(JST).isoformat()
         )
 
-    def fetch_user_past_bookings_this_month(self, user_name: str) -> list:
+    def fetch_user_past_bookings_this_month(self, user_name: str, user_id: str = "", allow_legacy: bool = True) -> list:
         """
         今月1日〜昨日までの、指定ユーザーの予約をカレンダーから取得する。
         今月の利用回数カウント用。
@@ -282,7 +261,7 @@ class CalendarService:
         if not self._service:
             self.initialize_sync()
             if not self._service:
-                return []
+                raise CalendarUnavailable("Calendar is not initialized")
 
         now = datetime.now(JST)
         # 今月1日の0時
@@ -304,12 +283,14 @@ class CalendarService:
         
         for ev in work_events:
             title = ev.get("summary", "")
-            if normalized_user_name not in title.replace(" ", "").replace("　", ""):
+            customer_id = ev.get("extendedProperties", {}).get("private", {}).get("line_user_id", "")
+            if not (customer_id == user_id if customer_id else allow_legacy and name_matches(user_name, title)):
                 continue
             store = "unknown"
-            if "(半)" in title or "（半）" in title:
+            title = " ".join(str(ev.get(k, "")) for k in ("summary", "location", "description"))
+            if any(x in title for x in ("(半)", "（半）", "半蔵門")):
                 store = "hanzoomon"
-            elif "(恵)" in title or "（恵）" in title:
+            elif any(x in title for x in ("(恵)", "（恵）", "恵比寿")):
                 store = "ebisu"
             b = self._transform_event(ev, store, "work")
             if b:
@@ -322,107 +303,34 @@ class CalendarService:
 # Singleton instance
 calendar_service = CalendarService()
 
-def get_slot_status(
-    slot_time: datetime,
-    store: str,
-    all_bookings: BookingData,
-    duration_min: int = 60
-) -> dict:
-    """
-    Get detailed status of a slot.
-    Returns:
-        {
-            "is_available": bool,
-            "reason": str,
-            "rooms_available": ["A", "B"], 
-            "conflict_count": int
-        }
-    """
-    slot_end = slot_time + timedelta(minutes=duration_min)
-    
-    # 1. Check Capacity
-    if store == "ebisu":
-        bookings = all_bookings.ebisu
-        max_cap = 2
-    elif store == "hanzoomon":
-        bookings = all_bookings.hanzoomon
-        max_cap = 3
-    else:
-        return {"is_available": False, "reason": "Unknown Store", "rooms_available": []}
-        
-    # 2. Check Overlap
-    overlapping = []
-    for b in bookings:
-        if max(slot_time, b.start_dt) < min(slot_end, b.end_dt):
-             if any(k in b.title for k in BLOCKING_KEYWORDS):
-                 return {"is_available": False, "reason": "Blocked", "rooms_available": []}
-             overlapping.append(b)
+def get_slot_status(slot_time, store, all_bookings, duration_min=60):
+    """Compatibility wrapper using the same rules as final confirmation."""
+    if duration_min != SESSION_DURATION:
+        return {'is_available': False, 'reason': 'invalid_duration', 'rooms_available': []}
+    return check_availability(slot_time, store, all_bookings)
 
-    # 3. Analyze Rooms (Ebisu)
-    rooms_available = []
-    if store == "ebisu":
-        taken_rooms = set()
-        for b in overlapping:
-            if b.room:
-                taken_rooms.add(b.room)
-        
-        if "A" not in taken_rooms:
-            rooms_available.append("A")
-        if "B" not in taken_rooms:
-            rooms_available.append("B")
-            
-        conflict_count = len(overlapping)
-        if conflict_count >= max_cap:
-             return {"is_available": False, "reason": "Full", "rooms_available": [], "conflict_count": conflict_count}
-             
-    else: # Hanzoomon
-        conflict_count = len(overlapping)
-        if conflict_count >= max_cap:
-             return {"is_available": False, "reason": "Full", "rooms_available": []}
-        rooms_available = ["Any"] * (max_cap - conflict_count)
 
-    return {
-        "is_available": True,
-        "reason": "OK",
-        "rooms_available": rooms_available,
-        "conflict_count": len(overlapping)
-    }
-
-def _get_detailed_store_status(
-    slot_time: datetime,
-    store: str,
-    all_bookings: BookingData,
-) -> dict:
-    """Get detailed availability status including room info."""
-    slot_end = slot_time + timedelta(minutes=60)
-    
+def _get_detailed_store_status(slot_time, store, all_bookings):
+    slot_end = slot_time + timedelta(minutes=SESSION_DURATION)
+    entries = all_bookings.ebisu if store == "ebisu" else all_bookings.hanzoomon
+    overlapping = [b for b in entries if max(slot_time,b.start_dt)<min(slot_end,b.end_dt)]
+    if any(any(k in b.title for k in BLOCKING_KEYWORDS + [UNAVAILABLE_KEYWORD]) for b in overlapping):
+        return {"is_full": True, "rooms_available": []}
     if store == "ebisu":
-        overlapping = []
-        for b in all_bookings.ebisu:
-            if max(slot_time, b.start_dt) < min(slot_end, b.end_dt):
-                overlapping.append(b)
-        
-        taken_rooms = set()
-        for b in overlapping:
-            if b.room:
-                taken_rooms.add(b.room)
-        
-        rooms_avail = []
-        if "A" not in taken_rooms:
-            rooms_avail.append("A")
-        if "B" not in taken_rooms:
-            rooms_avail.append("B")
-            
-        is_full = len(overlapping) >= 2
-        return {"is_full": is_full, "rooms_available": rooms_avail}
-    else:
-        overlapping = []
-        for b in all_bookings.hanzoomon:
-            if max(slot_time, b.start_dt) < min(slot_end, b.end_dt):
-                overlapping.append(b)
-        is_full = len(overlapping) >= 3
-        rooms_avail = ["Any"] * (3 - len(overlapping)) if not is_full else []
-        return {"is_full": is_full, "rooms_available": rooms_avail}
+        # Unknown room: do not promise a specific room until it is assigned.
+        if any(b.room not in STORE_CAPACITY['ebisu']['rooms'] for b in overlapping):
+            return {"is_full": True, "rooms_available": [], "reason": "room_unknown"}
+        taken = {b.room for b in overlapping}
+        rooms = [r for r in STORE_CAPACITY['ebisu']['rooms'] if r not in taken]
+        return {"is_full": not rooms, "rooms_available": rooms}
+    points = []
+    for b in overlapping:
+        points.extend([(max(slot_time,b.start_dt),1),(min(slot_end,b.end_dt),-1)])
+    active = peak = 0
+    for _,delta in sorted(points):
+        active += delta; peak = max(peak,active)
+    remaining = max(0,STORE_CAPACITY['hanzoomon']['max']-peak)
+    return {"is_full": remaining == 0, "rooms_available": ["Any"]*remaining}
 
 def is_topform_ishihara_booking(title: str) -> bool:
     """Detect if an event is a TOPFORM-related hold."""
@@ -444,19 +352,8 @@ def is_trainer_busy(
     for b in ishihara_bookings:
         # Overlap check
         if max(slot_time, b.start_dt) < min(slot_end, b.end_dt):
-            # Ignore if it's a TOPFORM hold without real work content
             if is_topform_ishihara_booking(b.title):
-                # Search for any real work booking (source='work' or other) in the same time
-                has_real_work = False
-                for wb in all_bookings.ishihara:
-                    if wb.id != b.id and max(b.start_dt, wb.start_dt) < min(b.end_dt, wb.end_dt):
-                        if not is_topform_ishihara_booking(wb.title):
-                            has_real_work = True
-                            break
-                if not has_real_work:
-                    continue # Ignore this hold
-            
-            # If not a TOPFORM hold, or has real work content -> Busy
+                continue
             return True
     return False
 
@@ -473,6 +370,10 @@ def has_travel_conflict(
     for b in ishihara_bookings:
         # If no store info, ignore for travel conflict
         if not b.store or b.store == "unknown":
+            if is_topform_ishihara_booking(b.title):
+                continue
+            if max(travel_window_start,b.start_dt)<min(travel_window_end,b.end_dt):
+                return True
             continue
             
         # Same store -> no travel needed
@@ -495,20 +396,10 @@ def check_availability(
     """
     Main availability check (Synced with TypeScript logic).
     """
-    now = datetime.now(JST)
-    # Check 3-hour deadline
-    if slot_time <= now + timedelta(hours=3):
-        return {"is_available": False, "reason": "deadline"}
-    
-    # Check 2-month rule (rough check)
-    if slot_time > now + timedelta(days=62):
-         return {"is_available": False, "reason": "too_far"}
-
-    # Business hours (Frontend handles this primarily, but backend validates it)
-    is_weekend = slot_time.weekday() >= 5 or _is_holiday(slot_time)
-    hours = BUSINESS_HOURS["weekend"] if is_weekend else BUSINESS_HOURS["weekday"]
-    if slot_time.hour < hours["start"] or slot_time.hour >= hours["end"]:
-        return {"is_available": False, "reason": "outside_hours"}
+    slot_time = as_jst(slot_time)
+    error = slot_error(slot_time, store, datetime.now(JST))
+    if error:
+        return {"is_available": False, "reason": error}
 
     # 1. Day off check
     if _has_all_day_event(slot_time, all_bookings.ishihara):
@@ -517,7 +408,7 @@ def check_availability(
     # 2. Store Capacity check
     store_status = _get_detailed_store_status(slot_time, store, all_bookings)
     if store_status["is_full"]:
-        return {"is_available": False, "reason": "store_full"}
+        return {"is_available": False, "reason": store_status.get("reason", "store_full")}
 
     # 3. Trainer Busy check
     if is_trainer_busy(slot_time, all_bookings.ishihara, all_bookings):
@@ -533,39 +424,32 @@ def _is_holiday(date: datetime) -> bool:
     date_str = date.strftime("%Y-%m-%d")
     return date_str in HOLIDAYS.get(date.year, [])
 
-def _has_all_day_event(slot_time: datetime, ishihara_bookings: list[Booking]) -> bool:
-    slot_date = slot_time.strftime("%Y-%m-%d")
-    for b in ishihara_bookings:
-        if b.start_dt.hour == 0 and b.start_dt.minute == 0:
-            if b.start_dt.strftime("%Y-%m-%d") == slot_date:
-                if any(kw in b.title for kw in BLOCKING_KEYWORDS):
-                    return True
-    return False
+def _has_all_day_event(slot_time, ishihara_bookings):
+    end = slot_time + timedelta(minutes=SESSION_DURATION)
+    return any(b.all_day and max(slot_time,b.start_dt)<min(end,b.end_dt)
+               and any(k in b.title for k in BLOCKING_KEYWORDS + [UNAVAILABLE_KEYWORD]) for b in ishihara_bookings)
 
-def get_available_slots(
-    target_date: datetime,
-    store: str,
-    all_bookings: BookingData,
-) -> list[datetime]:
-    is_weekend = target_date.weekday() >= 5 or _is_holiday(target_date)
-    hours = BUSINESS_HOURS["weekend"] if is_weekend else BUSINESS_HOURS["weekday"]
-    
-    available = []
-    for hour in range(hours["start"], hours["end"]):
-        slot = target_date.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if not slot.tzinfo: slot = JST.localize(slot)
-        if check_availability(slot, store, all_bookings)["is_available"]:
-            available.append(slot)
-    return available
+def get_available_slots(target_date, store, all_bookings):
+    target_date = as_jst(target_date)
+    hours = hours_for(target_date)
+    slots = [target_date.replace(hour=h,minute=m,second=0,microsecond=0)
+             for h in range(hours['start'],hours['end']) for m in (0,30)]
+    return [s for s in slots if check_availability(s,store,all_bookings)['is_available']]
 
+def name_matches(name, title):
+    normalized = re.sub(r"[\s　]+", "", name or "")
+    if len(normalized)<3: return False
+    # Legacy fallback only: require explicit token boundaries, never substring matching.
+    text = re.sub(r"[\s　]+", "", title or "")
+    return bool(re.search(r"(?<![\w一-龯ぁ-んァ-ヶ])" + re.escape(normalized) + r"(?:様|さん)?(?![\w一-龯ぁ-んァ-ヶ])",text))
 
-def find_user_bookings(user_name: str, all_bookings: BookingData) -> list[Booking]:
+def find_user_bookings(user_name: str, all_bookings: BookingData, user_id: str = "", allow_legacy: bool = True) -> list[Booking]:
     matches = []
     for b in all_bookings.ishihara:
         if b.source != "work": # プライベート予定は除外
             continue
         title = b.title or ""
         normalized_name = user_name.replace(" ", "").replace("　", "")
-        if normalized_name in title.replace(" ", "").replace("　", ""):
+        if (b.customer_id == user_id if b.customer_id else allow_legacy and name_matches(user_name,title)):
             matches.append(b)
     return sorted(matches, key=lambda b: b.start_dt)

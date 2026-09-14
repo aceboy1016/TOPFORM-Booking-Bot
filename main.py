@@ -1,384 +1,174 @@
-"""
-TOPFORM LINE Bot - Main Application
-公式LINE予約Botのメインエントリーポイント
-"""
-
-import asyncio
+"""ASGI entrypoint: verified webhooks and authenticated operational endpoints."""
+import json
+import logging
+import secrets
 from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, Request, HTTPException
+from datetime import datetime
+from typing import Literal
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.webhooks import (
-    MessageEvent,
-    FollowEvent,
-    TextMessageContent,
-    PostbackEvent,
-)
+from pydantic import BaseModel, Field
 from linebot.v3 import WebhookParser
-
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, PostbackEvent, FollowEvent
 from config import settings
-from database import db
-from calendar_service import calendar_service
+from booking_rules import JST
+from calendar_service import calendar_service, CalendarUnavailable, get_available_slots, find_user_bookings
+from sheets_service import sheets_service, SheetsUnavailable
+from database import db, current_event
 from line_service import line_service
+from async_services import google_call
+from notifications import flush_notifications
 
+logger=logging.getLogger(__name__)
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
-    print("🚀 Starting TOPFORM LINE Bot...")
-
-    # Validate configuration
-    missing = settings.validate()
-    if missing:
-        print(f"⚠️  Warning: Missing configuration: {', '.join(missing)}")
-
-    # Initialize database
+async def lifespan(app):
+    missing=settings.validate()
+    if missing: raise RuntimeError('Missing configuration: '+', '.join(missing))
     await db.init_db()
-    print("✅ Database initialized")
-
-    # Initialize Google Calendar
     try:
-        await calendar_service.initialize()
-        print("✅ Google Calendar Service initialized")
-    except Exception as e:
-        print(f"⚠️  Calendar Service init failed: {e}")
+        await google_call(calendar_service.initialize_sync)
+        await google_call(sheets_service.fetch_customer_master)
+        await line_service.initialize()
+        await line_service._get_bookings(force=True)
+        yield
+    finally:
+        await line_service.close()
+        await db.close()
 
-    # Initialize LINE
-    await line_service.initialize()
-    print("✅ LINE Service initialized")
+app=FastAPI(title='TOPFORM Booking Bot',version='2.0.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
 
-    print("🎉 TOPFORM LINE Bot is ready!")
+async def require_admin(request:Request):
+    value=request.headers.get('authorization','')
+    token=settings.ADMIN_API_TOKEN
+    if len(token)<32 or not secrets.compare_digest(value,'Bearer '+token):
+        raise HTTPException(401,'Authentication required',headers={'WWW-Authenticate':'Bearer'})
 
-    yield
+@app.exception_handler(CalendarUnavailable)
+@app.exception_handler(SheetsUnavailable)
+async def unavailable(request,exc):
+    return JSONResponse(status_code=503,content={'detail':'External service temporarily unavailable'})
 
-    print("👋 Shutting down TOPFORM LINE Bot...")
+@app.api_route('/',methods=['GET','HEAD'])
+async def root(): return {'status':'ok','service':'TOPFORM Booking Bot'}
 
-
-app = FastAPI(
-    title="TOPFORM LINE Bot",
-    description="TOPFORM公式LINE 予約Bot（石原トレーナー）",
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
-
-# ============================================================
-# Health check
-# ============================================================
-@app.api_route("/", methods=["GET", "HEAD"])
-async def root():
-    """Health check endpoint."""
-    return {
-        "status": "ok",
-        "service": "TOPFORM_LINE_Bot",
-        "version": "1.0.0",
-    }
-
-
-@app.api_route("/health", methods=["GET", "HEAD"])
+@app.api_route('/health',methods=['GET','HEAD'])
 async def health_check():
-    """Detailed health check."""
-    return {
-        "status": "healthy",
-        "services": {
-            "database": "connected",
-            "line": "initialized",
-            "calendar": "ready",
-        },
-    }
+    try: await db.health(); database_ready=True
+    except Exception: database_ready=False
+    calendar_ready=bool(calendar_service.last_success and calendar_service._consecutive_errors==0)
+    ready=not settings.validate() and database_ready and calendar_ready and line_service._api is not None
+    return JSONResponse(status_code=200 if ready else 503,content={'status':'healthy' if ready else 'unavailable','services':{'database':database_ready,'calendar':calendar_ready,'line':line_service._api is not None}})
 
-
-# ============================================================
-# LINE Webhook
-# ============================================================
-@app.post("/webhook")
-async def webhook_handler(request: Request):
-    """LINE Webhook endpoint."""
-    signature = request.headers.get("X-Line-Signature", "")
-    if not signature:
-        raise HTTPException(status_code=400, detail="Missing signature")
-
-    body = await request.body()
-    body_text = body.decode("utf-8")
-
-    try:
-        parser = WebhookParser(settings.LINE_CHANNEL_SECRET)
-        events = parser.parse(body_text, signature)
-
-        print(f"📩 Webhook received: {len(events)} event(s)")
-
-        for event in events:
-            # Cloud Runではレスポンス返却後にCPUが割り当てられなくなるため
-            # awaitして処理完了まで待機する必要があります。
-            await process_event(event)
-
-        return JSONResponse(content={"status": "ok"})
-
-    except InvalidSignatureError:
-        print("❌ Invalid signature!")
-        raise HTTPException(status_code=400, detail="Invalid signature")
-    except Exception as e:
-        print(f"❌ Webhook error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
+@app.post('/webhook')
+async def webhook_handler(request:Request):
+    signature=request.headers.get('X-Line-Signature','')
+    if not signature or not settings.LINE_CHANNEL_SECRET: raise HTTPException(400,'Invalid webhook')
+    body=bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body)>256*1024: raise HTTPException(413,'Webhook too large')
+    try: events=WebhookParser(settings.LINE_CHANNEL_SECRET).parse(body.decode('utf-8'),signature)
+    except (InvalidSignatureError,ValueError,UnicodeDecodeError): raise HTTPException(400,'Invalid webhook')
+    for event in events: await process_event(event)
+    return {'status':'ok'}
 
 async def process_event(event):
-    """Process a single LINE event."""
-    event_type = type(event).__name__
+    uid=getattr(event.source,'user_id',None)
+    if not uid: return
+    event_id=getattr(event,'webhook_event_id',None)
+    if not event_id: raise HTTPException(400,'Webhook event ID required')
+    key='event:'+event_id
+    if await db.is_done(key):
+        await flush_notifications(line_service._api)
+        return
+    owner=await db.claim(key,ttl=300)
+    if not owner: raise HTTPException(503,'Event already processing')
+    user_key='user:'+uid; user_owner=await db.claim(user_key,ttl=300)
+    if not user_owner:
+        await db.release(key,owner)
+        raise HTTPException(503,'User operation already processing')
+    context_token=current_event.set(event_id)
+    completed=False
     try:
-        user_id = event.source.user_id
-        print(f"🔄 Processing {event_type} from {user_id[:8]}...")
-        
-        # Get or create user for all event types
-        # This ensures we have display_name even for postbacks
-        display_name = await line_service.get_user_profile(user_id)
-        user = await db.get_or_create_user(user_id, display_name)
+        user=await db.get_or_create_user(uid)
+        if isinstance(event,FollowEvent): await line_service.handle_follow_event(event)
+        elif isinstance(event,MessageEvent) and isinstance(event.message,TextMessageContent):
+            await line_service.handle_text_message(event,user)
+        elif isinstance(event,PostbackEvent): await line_service.handle_postback_event(event,user)
+        completed=True
+    except (CalendarUnavailable,SheetsUnavailable):
+        # Never turn missing calendar data into availability. Event remains retryable.
+        try: await line_service.reply_text(event.reply_token,'現在データを確認できません。時間を置いて再度お試しください。')
+        except Exception: pass
+        raise HTTPException(503,'External service unavailable')
+    except Exception:
+        logger.error('Webhook processing failed',extra={'event_id':event_id})
+        raise HTTPException(503,'Processing temporarily unavailable')
+    finally:
+        current_event.reset(context_token)
+        await db.release(key,owner,done=completed)
+        await db.release(user_key,user_owner)
+        # Outbox survives reply failures. Scheduler also retries pending deliveries.
+        try: await flush_notifications(line_service._api)
+        except Exception: logger.error('Outbox drain failed; pending deliveries retained')
 
-        if isinstance(event, FollowEvent):
-            print(f"  👤 Follow event")
-            await line_service.handle_follow_event(event)
+@app.get('/api/availability/{date}')
+async def get_availability(date:str,store:Literal['ebisu','hanzoomon']='ebisu'):
+    try: target=JST.localize(datetime.strptime(date,'%Y-%m-%d'))
+    except ValueError: raise HTTPException(400,'Use YYYY-MM-DD')
+    snapshot=await line_service._get_bookings()
+    slots=get_available_slots(target,store,snapshot)
+    return {'date':date,'store':store,'available_slots':[s.strftime('%H:%M') for s in slots],'count':len(slots)}
 
-        elif isinstance(event, MessageEvent):
-            # Handle text messages
-            if isinstance(event.message, TextMessageContent):
-                print(f"  💬 Text: {event.message.text[:50]}")
-                await line_service.handle_text_message(event, user)
-            else:
-                print(f"  📎 Non-text message: {type(event.message).__name__}")
-        
-        elif isinstance(event, PostbackEvent):
-            print(f"  🔘 Postback: {event.postback.data[:50]}")
-            await line_service.handle_postback_event(event, user)
-        
-        else:
-            print(f"  ⏭️ Unhandled event type: {event_type}")
+@app.get('/api/bookings/{line_user_id}',dependencies=[Depends(require_admin)])
+async def get_user_bookings(line_user_id:str):
+    return {'bookings':await db.get_user_bookings(line_user_id,include_past=True)}
 
-        print(f"✅ {event_type} processed successfully")
-
-    except Exception as e:
-        print(f"❌ Error processing {event_type}: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-# ============================================================
-# API endpoints (for debugging/admin)
-# ============================================================
-@app.get("/api/availability/{date}")
-async def get_availability(date: str, store: str = "ebisu"):
-    """Get available slots for a date (YYYY-MM-DD)."""
-    from datetime import datetime
-    import pytz
-
-    JST = pytz.timezone("Asia/Tokyo")
-
-    try:
-        target = JST.localize(datetime.strptime(date, "%Y-%m-%d"))
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-
-    from calendar_service import get_available_slots
-
-    bookings = calendar_service.fetch_all_bookings()
-    slots = get_available_slots(target, store, bookings)
-
-    return {
-        "date": date,
-        "store": store,
-        "available_slots": [s.strftime("%H:%M") for s in slots],
-        "count": len(slots),
-    }
-
-
-@app.get("/api/bookings/{line_user_id}")
-async def get_user_bookings(line_user_id: str):
-    """Get bookings for a user."""
-    bookings = await db.get_user_bookings(line_user_id, include_past=True)
-    return {"bookings": bookings}
-
-
-@app.get("/api/check-waitlist")
+@app.post('/api/check-waitlist',dependencies=[Depends(require_admin)])
 async def trigger_check_waitlist():
-    """Check waitlist and notify users if there are available slots."""
-    from sheets_service import sheets_service
-    from calendar_service import calendar_service, check_availability
-    from line_service import line_service
-    from datetime import datetime
-    import pytz
-    
-    # Ensure services are initialized
-    await line_service.initialize()
-    
-    JST = pytz.timezone("Asia/Tokyo")
-    waitlist = sheets_service.fetch_waitlist()
-    if not waitlist:
-        return {"status": "success", "message": "No waitlist entries"}
+    from waitlist_service import check_waitlist
+    try: return await check_waitlist()
+    finally: await flush_notifications(line_service._api)
 
-    bookings = calendar_service.fetch_all_bookings()
-    notified_count = 0
-    results = []
+@app.post('/api/notifications/retry',dependencies=[Depends(require_admin)])
+async def retry_notifications():
+    await flush_notifications(line_service._api)
+    return {'status':'processed'}
 
-    for entry in waitlist:
-        if entry["status"] != "待機中":
-            continue
-            
-        date_str = entry["date"]
-        time_str = entry["time"]
-        store_entry = entry["store"]
-        stores_to_check = []
-        if "恵比寿" in store_entry or "または" in store_entry or "どちら" in store_entry:
-            stores_to_check.append("ebisu")
-        if "半蔵門" in store_entry or "または" in store_entry or "どちら" in store_entry:
-            stores_to_check.append("hanzoomon")
-        if not stores_to_check:
-            stores_to_check = ["ebisu"]
-        
-        try:
-            target_date = JST.localize(datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M"))
-        except Exception as e:
-            print(f"Date parsing error: {e}")
-            continue
-                
-        # Check availability
-        is_available = False
-        available_store_name = store_entry
-        for sc in stores_to_check:
-            status = check_availability(target_date, sc, bookings)
-            if status.get("is_available"):
-                is_available = True
-                available_store_name = "恵比寿店" if sc == "ebisu" else "半蔵門店"
-                break
-        
-        if is_available:
-            import json
-            # Interactive Flex Message
-            postback_data_accept = json.dumps({
-                "action": "waitlist_accept",
-                "date": date_str,
-                "time": time_str,
-                "store": available_store_name
-            })
-            postback_data_decline = json.dumps({
-                "action": "waitlist_decline",
-                "date": date_str,
-                "time": time_str,
-                "store": available_store_name
-            })
-            
-            flex_content = {
-                "type": "bubble",
-                "body": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": "🚨 空き枠のお知らせ",
-                            "weight": "bold",
-                            "color": "#ff0000",
-                            "size": "md"
-                        },
-                        {
-                            "type": "text",
-                            "text": f"{entry['name']}様\nキャンセル待ちされていた以下の日時に空きが出ました！",
-                            "wrap": True,
-                            "size": "sm",
-                            "margin": "md"
-                        },
-                        {
-                            "type": "box",
-                            "layout": "vertical",
-                            "margin": "md",
-                            "spacing": "sm",
-                            "contents": [
-                                {
-                                    "type": "text",
-                                    "text": f"📅 {date_str} {time_str}",
-                                    "weight": "bold",
-                                    "size": "md"
-                                },
-                                {
-                                    "type": "text",
-                                    "text": f"📍 {available_store_name}",
-                                    "weight": "bold",
-                                    "size": "md"
-                                }
-                            ]
-                        },
-                        {
-                            "type": "text",
-                            "text": "この枠で予約手続きを進めますか？\n（※先着順となりますので、入れ違いで埋まってしまった場合はご了承ください🙇‍♂️）",
-                            "wrap": True,
-                            "size": "xs",
-                            "color": "#666666",
-                            "margin": "lg"
-                        }
-                    ],
-                    "paddingAll": "20px"
-                },
-                "footer": {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "spacing": "md",
-                    "contents": [
-                        {
-                            "type": "button",
-                            "action": {
-                                "type": "postback",
-                                "label": "受けます",
-                                "data": postback_data_accept,
-                                "displayText": "キャンセル待ちをお受けします（希望します）"
-                            },
-                            "style": "primary",
-                            "color": "#E63946"
-                        },
-                        {
-                            "type": "button",
-                            "action": {
-                                "type": "postback",
-                                "label": "見送ります",
-                                "data": postback_data_decline,
-                                "displayText": "今回は見送ります"
-                            },
-                            "style": "secondary"
-                        }
-                    ],
-                    "paddingAll": "20px"
-                }
-            }
+@app.get('/api/notifications',dependencies=[Depends(require_admin)])
+async def notification_backlog():
+    return {'notifications':await db.notification_backlog()}
 
-            try:
-                if entry["line_id"]:
-                    await line_service.push_flex(entry["line_id"], "空き枠のお知らせ", flex_content)
-                    sheets_service.update_waitlist_status(entry["row_index"], "通知済み")
-                    notified_count += 1
-                    results.append({"name": entry["name"], "status": "notified"})
-                else:
-                    results.append({"name": entry["name"], "status": "no_line_id"})
-            except Exception as e:
-                print(f"Failed to notify {entry['name']}: {e}")
-                results.append({"name": entry["name"], "status": "error", "error": str(e)})
+@app.get('/api/requests',dependencies=[Depends(require_admin)])
+async def pending_requests(): return {'requests':await db.pending_bookings()}
 
-    return {
-        "status": "success",
-        "processed": len([e for e in waitlist if e["status"] == "待機中"]),
-        "notified": notified_count,
-        "details": results
-    }
+@app.get('/api/waitlist',dependencies=[Depends(require_admin)])
+async def waitlist_overview(): return {'requests':await db.waitlist_overview()}
 
+class ReviewRequest(BaseModel):
+    status:Literal['confirmed','rejected']
+    calendar_id:str=Field(default='',max_length=1024)
 
-# ============================================================
-# Local development
-# ============================================================
-if __name__ == "__main__":
+@app.post('/api/requests/{public_id}/review',dependencies=[Depends(require_admin)])
+async def review_request(public_id:str,body:ReviewRequest):
+    pending=await db.pending_bookings()
+    row=next((r for r in pending if r['public_id']==public_id),None)
+    if not row: raise HTTPException(409,'Request is not pending')
+    if body.status=='confirmed':
+        customer=await google_call(sheets_service.get_customer_by_line_id,row['line_user_id'])
+        if not customer: raise HTTPException(409,'Customer is no longer registered')
+        snapshot=await line_service._get_bookings(force=True)
+        matches=find_user_bookings(customer['name'],snapshot,row['line_user_id'],allow_legacy=not customer.get('ambiguous_name',False))
+        match=next((b for b in matches if b.id==body.calendar_id),None)
+        if not match or match.start_dt.isoformat()!=row['slot_datetime'] or match.store!=row['store']:
+            raise HTTPException(409,'Calendar event does not match the request')
+    changed=await db.review_booking(public_id,body.status,body.calendar_id)
+    if not changed: raise HTTPException(409,'Request was already reviewed')
+    await flush_notifications(line_service._api)
+    return {'status':body.status}
+
+if __name__=='__main__':
     import uvicorn
-
-    uvicorn.run(
-        "main:app",
-        host=settings.HOST,
-        port=settings.PORT,
-        reload=settings.DEBUG,
-    )
+    uvicorn.run('main:app',host=settings.HOST,port=settings.PORT,reload=settings.DEBUG)
