@@ -10,14 +10,14 @@
 - 未登録利用者はID確認以外の予約操作を拒否。12時間以内の取消は1回消化、3時間以内は直前通知。
 - CalendarとSheetsの取得失敗を空データに変換しない。日時は常にJSTへ正規化。
 - APIキーや認証JSONは作業ツリー・ログに保存しない。
-- Cloud Run本番は共有PostgreSQL必須。SQLiteはローカル専用。
+- 本番は無料枠対象のFirestore `(default)` を使用。SQLiteはローカル専用。Cloud SQL等の固定費のあるDBは導入しない。追加費用が避けられない変更は具体額を提示する。
 - 受付と通知Outboxを同一トランザクションで保存。LINE再送には同じretry keyを使う。
 - 応答後の裸のasyncio.create_taskで業務処理を続けない。同期Google呼び出しはasync_services.google_callをawaitする。
 - 変更前予約は承認まで保持する。Calendarの変更・取消反映はスタッフの作業。
 
 ## 検証・運用
 
-`venv/bin/python -m pytest -q`を実行。既存の実API確認スクリプトと`tests/`のオフライン回帰テストを混同しないこと。PostgreSQLテストは`TEST_DATABASE_URL`を専用`topform_test` DBへ指定します。
+`venv/bin/python -m pytest -q`を実行。既存の実API確認スクリプトと`tests/`のオフライン回帰テストを混同しないこと。本番と同じ保存処理はローカルFirestore emulatorでテストする（`TEST_FIRESTORE=1`、`FIRESTORE_EMULATOR_HOST=127.0.0.1:8681`）。課金される本番DBをテストに使わない。
 
 Flexボタンは本人に紐付いたサーバー側操作トークンを使い、300バイト以内に収めます。reply tokenは1回のみ使用します。
 
