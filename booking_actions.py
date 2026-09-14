@@ -27,11 +27,12 @@ def cancel_band(slot):
     hours=(slot-datetime.now(JST)).total_seconds()/3600
     return 'urgent' if hours<=settings.URGENT_CONTACT_DEADLINE_HOURS else 'consume' if hours<=settings.BOOKING_DEADLINE_HOURS else 'normal'
 
-async def cancellation_confirmation(service,token,uid,booking):
+async def cancellation_confirmation(service,token,uid,booking,context=""):
     band=cancel_band(booking['dt'])
     note={'normal':'この予約の取消を申請しますか？','consume':'開始12時間以内のため1回分消化扱いになります。取消を申請しますか？','urgent':'開始3時間以内のため1回分消化扱いになります。担当者へ直前取消を申請しますか？'}[band]
     data=await db.make_action(uid,{'a':'cancel_confirm','t':booking['type'],'bid':booking['id'],'band':band})
-    await service.reply_flex(token,'予約取消の確認',service._build_confirm_flex('予約取消の確認',note+'\n'+booking['dt'].strftime('%m/%d %H:%M'),'取消を申請する',data,'#cc0000'))
+    await db.set_session(uid,'conversation','cancel_confirmation',json.dumps({'cancel_action':json.loads(data)['id']}))
+    await service.reply_flex(token,'予約取消の確認',service._build_confirm_flex('予約取消の確認',context+'\n'+note+'\n'+booking['dt'].strftime('%m/%d %H:%M')+' '+STORE_NAMES[booking['store']],'取消を申請する',data,'#cc0000'))
 
 async def handle_action(service,event,user):
     uid,token=event.source.user_id,event.reply_token
@@ -79,6 +80,11 @@ async def handle_action(service,event,user):
     if action=='cancel_request':
         await cancellation_confirmation(service,token,uid,booking);return
     if action=='cancel_confirm':
+        session=await db.get_session(uid)
+        context=json.loads(session.get('flow_data','{}')) if session else {}
+        if context.get('cancel_action')!=raw.get('id'):
+            await service.reply_text(token,'この確認は終了しています。取り消したい予約をもう一度選んでください。')
+            return
         if data.get('band')!=cancel_band(booking['dt']):
             await cancellation_confirmation(service,token,uid,booking);return
         band=cancel_band(booking['dt'])
@@ -94,11 +100,15 @@ async def handle_action(service,event,user):
                 except Exception:
                     await db.release(key,owner);raise
         await service.reply_text(token,'取消申請を受け付けました。スタッフがカレンダーへの反映を確認します。' if changed else 'この取消申請は受付済みです。')
+        await db.clear_session(uid)
         service._invalidate_cache();return
+    if action=='conversation_select':
+        from conversation import begin_change
+        if data.get('intent')=='cancel':
+            await cancellation_confirmation(service,token,uid,booking)
+        elif data.get('intent')=='change':
+            await begin_change(service,token,uid,user,booking,desired=data.get('desired'))
+        return
     if action=='scb':
-        if cancel_band(booking['dt'])!='normal':
-            await cancellation_confirmation(service,token,uid,booking);return
-        payload={'mode':'change','target_booking_id':booking['id'],'target_booking_type':booking['type'],'room_pref':user.get('room_pref'),'original_booking_info':{'dt':booking['dt'].isoformat(),'store':booking['store']}}
-        await db.set_session(uid,'booking','select_store',json.dumps(payload))
-        qr=QuickReply(items=[QuickReplyItem(action=MessageAction(label=name,text=name)) for name in ['恵比寿店','半蔵門店','両店舗','戻る']])
-        await service.reply_text(token,'変更後の店舗を選んでください。元の予約はスタッフの変更完了まで保持します。',quick_reply=qr)
+        from conversation import begin_change
+        await begin_change(service,token,uid,user,booking)

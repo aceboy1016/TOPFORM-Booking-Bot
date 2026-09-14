@@ -74,6 +74,7 @@ async def test_calendar_cancellation_accepts_and_notifies(service,database):
     day=future();booking=Booking('cal',day,day+timedelta(hours=1),'ebisu','架空太郎（恵）',source='work')
     service._get_bookings=AsyncMock(return_value=BookingData([],[],[booking]))
     action=json.loads(await database.make_action('u',{'a':'cancel_confirm','t':'cal','bid':'cal','band':'normal'}))
+    await database.set_session('u','conversation','cancel_confirmation',json.dumps({'cancel_action':action['id']}))
     await service.handle_postback_event(event(data=action),user())
     assert await database.is_done('calendar-cancel:u:cal')
     assert len(await database.pending_notifications())==1
