@@ -58,6 +58,18 @@ async def handle_action(service,event,user):
     if not data:
         await service.reply_text(token,'⏳ このボタンは期限切れです。\n\n「予約確認」から最新の予約を表示してくださいね😊');return
     action=data.get('a')
+    if action == 'waitlist_withdraw':
+        changed=await db.withdraw_waitlist(data['wid'],uid)
+        await service.reply_text(token,'👌 キャンセル待ちを取り下げました。予約はそのまま残っています。' if changed else '💡 このキャンセル待ちは受付を終了しています。')
+        return
+    if action == 'support_confirm':
+        session=await db.get_session(uid)
+        context=json.loads(session['flow_data']) if session else {}
+        if not session or session['flow_type']!='support' or session['flow_state']!='confirm' or context.get('id')!=data.get('support_id'):
+            await service.reply_text(token,'💡 この申込み確認は終了しています。');return
+        from conversation_extras import confirm_support
+        await confirm_support(service,token,uid,user,context)
+        return
     if action in ('pick_slot', 'picker_page', 'picker_confirm'):
         session = await db.get_session(uid)
         context = json.loads(session.get('flow_data', '{}')) if session else {}

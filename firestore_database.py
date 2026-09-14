@@ -294,7 +294,9 @@ class FirestoreDatabase:
             unit.put(ref, row)
             if error is None and row['kind'].startswith('flex:'):
                 wid = row['kind'].split(':', 1)[1]
-                await self._enqueue(unit, 'sheet-offer:' + wid, 'sheets', json.dumps({'id': wid, 'status': '通知済み'}), 'sheet')
+                request=await unit.get(self.ref('waitlist_requests',wid))
+                if not request or json.loads(request['payload']).get('source')!='chat':
+                    await self._enqueue(unit, 'sheet-offer:' + wid, 'sheets', json.dumps({'id': wid, 'status': '通知済み'}), 'sheet')
         await self._run(operation)
 
     async def notification_backlog(self):
@@ -312,10 +314,48 @@ class FirestoreDatabase:
         row = await self._get('action_tokens', ident)
         return json.loads(row['payload']) if row and row['line_user_id'] == user_id and row['expires_at'] >= now_iso() else None
 
+    async def user_waitlists(self,uid):
+        return [r for r in await self._rows('waitlist_requests','line_user_id',uid) if r['state'] in ('waiting','offered')][:100]
+
+    async def withdraw_waitlist(self,ident,uid):
+        async def operation(unit):
+            ref=self.ref('waitlist_requests',ident)
+            row=await unit.get(ref)
+            if not row or row['line_user_id']!=uid or row['state'] not in ('waiting','offered'): return False
+            row.update(state='cancelled',updated_at=now_iso());unit.put(ref,row)
+            await self._enqueue(unit,'waitlist-withdraw:'+ident,settings.ADMIN_USER_ID,'🔔 キャンセル待ちの取り下げ\n受付番号: '+ident)
+            return True
+        return await self._run(operation)
+
+    async def request_waitlist(self,ident,user_id,payload,notice):
+        async def operation(unit):
+            ref=self.ref('waitlist_requests',ident)
+            if await unit.get(ref): return False
+            unit.put(ref,dict(id=ident,line_user_id=user_id,payload=json.dumps(payload),state='waiting',updated_at=now_iso()))
+            await self._enqueue(unit,'waitlist-request:'+ident,settings.ADMIN_USER_ID,notice)
+            return True
+        return await self._run(operation)
+
+    async def waiting_requests(self):
+        rows=await self._rows('waitlist_requests','state','waiting',limit=100)
+        valid=[]
+        for row in rows:
+            dates=json.loads(row['payload']).get('dates',[])
+            if dates and max(dates)<datetime.now(JST).strftime('%Y-%m-%d'):
+                async def expire(unit):
+                    ref=self.ref('waitlist_requests',row['id'])
+                    current=await unit.get(ref)
+                    if current and current['state']=='waiting':
+                        current['state']='expired';unit.put(ref,current)
+                await self._run(expire)
+            else: valid.append(row)
+        return valid
+
     async def save_waitlist_offer(self, ident, user_id, payload, flex):
         async def operation(unit):
             ref = self.ref('waitlist_requests', ident)
-            if await unit.get(ref):
+            current=await unit.get(ref)
+            if current and (current['state']!='waiting' or current['line_user_id']!=user_id):
                 return False
             unit.put(ref, dict(id=ident, line_user_id=user_id, payload=json.dumps(payload), state='offered', updated_at=now_iso()))
             await self._enqueue(unit, 'waitlist-offer:' + ident, user_id, json.dumps(flex), 'flex:' + ident)
@@ -344,7 +384,8 @@ class FirestoreDatabase:
             row.update(state=state, updated_at=now_iso())
             unit.put(ref, row)
             await self._enqueue(unit, 'waitlist-response:' + ident, settings.ADMIN_USER_ID, notice)
-            await self._enqueue(unit, 'sheet-response:' + ident, 'sheets', json.dumps({'id': ident, 'status': '承諾' if state == 'accepted' else '辞退'}), 'sheet')
+            if json.loads(row['payload']).get('source')!='chat':
+                await self._enqueue(unit, 'sheet-response:' + ident, 'sheets', json.dumps({'id': ident, 'status': '承諾' if state == 'accepted' else '辞退'}), 'sheet')
             return True
         return await self._run(operation)
 

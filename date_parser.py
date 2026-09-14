@@ -56,4 +56,25 @@ def parse_dates(text: str, now: datetime | None = None) -> list[datetime]:
         for day in range(1,calendar.monthrange(year_context,month_context)[1]+1):
             candidate=JST.localize(datetime(year_context,month_context,day))
             if candidate>=today: dates.add(candidate)
-    return sorted(dates)
+    # Bare periods are ranges; a qualified weekday keeps its single-day meaning.
+    if not dates:
+        period=re.search(r'(再来週|来週|今週|今月|来月|週末)', text)
+        if period:
+            word=period[1]
+            if word in ('今月','来月'):
+                year,month=now.year,now.month+(word=='来月')
+                if month==13: year,month=year+1,1
+                first=today if word=='今月' else JST.localize(datetime(year,month,1))
+                last=JST.localize(datetime(year,month,calendar.monthrange(year,month)[1]))
+            else:
+                offset={'今週':0,'来週':7,'再来週':14,'週末':0}[word]
+                first=today+timedelta(days=-today.weekday()+offset+(5 if word=='週末' else 0))
+                last=today+timedelta(days=-today.weekday()+offset+6)
+                first=max(first,today)
+            for i in range(max(0,(last-first).days+1)): dates.add(first+timedelta(days=i))
+    ordered=sorted(dates)
+    if len(ordered)==2 and re.search(r'(?:日|\d)\s*(?:から|〜|~|～)\s*(?:\d)',text):
+        first,last=ordered
+        if (last-first).days<=62:
+            ordered=[first+timedelta(days=i) for i in range((last-first).days+1)]
+    return ordered

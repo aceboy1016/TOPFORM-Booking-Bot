@@ -4,6 +4,7 @@ Never execute cancellation from free text: resolve an owned reservation, then
 use the existing expiring confirmation action. No external language model.
 """
 import json
+from datetime import datetime
 import re
 import unicodedata
 from database import db
@@ -106,6 +107,8 @@ async def route(service, event, user, session):
         from booking_view import monthly_usage_reply
         await monthly_usage_reply(service, token, uid, user, session)
         return True
+    from conversation_extras import route as extras_route
+    if await extras_route(service,event,user,session): return True
     viewing=bool(re.fullmatch(r'(?:今の|今ある|自分の|私の)?(?:予約確認|予約一覧|マイ予約|予約(?:を|の)?(?:確認(?:したい|する|して|お願いします)?|見せて(?:ください)?|見たい|教えて(?:ください)?|いつ(?:だっけ)?))',compact))
     viewing = viewing or bool(re.fullmatch(r'(?:今|私の|自分の)?予約(?:って|は)?(?:いつだっけ|入ってる|ありますか|ある)',compact))
     starting=bool(re.fullmatch(r'(?:じゃあ|では|それなら)?(?:新しく|新規で|もう一件|別で)?(?:予約する|予約したい(?:です)?|予約したいんだけど|予約を?(?:お願い(?:します|したい)?|取りたい(?:です)?))',compact))
@@ -172,7 +175,11 @@ async def route(service, event, user, session):
     if abort_change or (abort and active):
         if active:
             await db.clear_session(uid)
-            await service.reply_text(token, '👌 変更の入力を中止しました。\n\n📅 元の予約はそのまま残っています。\nまた変更したくなったら声をかけてくださいね😊' if changing else '👌 予約の入力を中止しました。\n\n📅 受付済みの予約は取り消していません。')
+            message='👌 変更の入力を中止しました。\n\n📅 元の予約はそのまま残っています。' if changing else '👌 予約の入力を中止しました。\n\n📅 受付済みの予約は取り消していません。'
+            if changing and data.get('original_booking_info'):
+                original=data['original_booking_info']
+                message+='\n\n'+label({'dt':datetime.fromisoformat(original['dt']),'store':original['store']})
+            await service.reply_text(token,message)
             return True
         if abort_change and data.get('last_request') and data.get('change_from'):
             booking = await resolve_booking(service, uid, user, 'db', data['last_request'])

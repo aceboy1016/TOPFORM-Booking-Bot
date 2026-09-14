@@ -197,7 +197,9 @@ class Database:
                 row=(await conn.execute(select(outbox).where(outbox.c.id==ident))).mappings().first()
                 if row and row['kind'].startswith('flex:'):
                     entry_id=row['kind'].split(':',1)[1]
-                    await self._enqueue(conn,'sheet-offer:'+entry_id,'sheets',json.dumps({'id':entry_id,'status':'通知済み'}),'sheet')
+                    stored=(await conn.execute(select(waitlist.c.payload).where(waitlist.c.id==entry_id))).scalar()
+                    if not stored or json.loads(stored).get('source')!='chat':
+                        await self._enqueue(conn,'sheet-offer:'+entry_id,'sheets',json.dumps({'id':entry_id,'status':'通知済み'}),'sheet')
 
     async def notification_backlog(self):
         async with self.engine.connect() as conn:
@@ -213,10 +215,41 @@ class Database:
             row=(await conn.execute(select(actions).where(actions.c.id==ident,actions.c.line_user_id==user_id,actions.c.expires_at>=now_iso()))).mappings().first()
             return json.loads(row['payload']) if row else None
 
+    async def user_waitlists(self,uid):
+        async with self.engine.connect() as conn:
+            return [dict(r) for r in (await conn.execute(select(waitlist).where(waitlist.c.line_user_id==uid,waitlist.c.state.in_(['waiting','offered'])).limit(100))).mappings()]
+
+    async def withdraw_waitlist(self,ident,uid):
+        async with self.engine.begin() as conn:
+            res=await conn.execute(update(waitlist).where(waitlist.c.id==ident,waitlist.c.line_user_id==uid,waitlist.c.state.in_(['waiting','offered'])).values(state='cancelled',updated_at=now_iso()))
+            if not res.rowcount: return False
+            await self._enqueue(conn,'waitlist-withdraw:'+ident,settings.ADMIN_USER_ID,'🔔 キャンセル待ちの取り下げ\n受付番号: '+ident)
+            return True
+
+    async def request_waitlist(self,ident,user_id,payload,notice):
+        async with self.engine.begin() as conn:
+            res=await conn.execute(self.insert(waitlist).values(id=ident,line_user_id=user_id,payload=json.dumps(payload),state='waiting',updated_at=now_iso()).on_conflict_do_nothing(index_elements=['id']).returning(waitlist.c.id))
+            if not res.first(): return False
+            await self._enqueue(conn,'waitlist-request:'+ident,settings.ADMIN_USER_ID,notice)
+            return True
+
+    async def waiting_requests(self):
+        async with self.engine.begin() as conn:
+            rows=[dict(r) for r in (await conn.execute(select(waitlist).where(waitlist.c.state=='waiting'))).mappings()]
+            valid=[]
+            for row in rows:
+                dates=json.loads(row['payload']).get('dates',[])
+                if dates and max(dates)<datetime.now(JST).strftime('%Y-%m-%d'):
+                    await conn.execute(update(waitlist).where(waitlist.c.id==row['id'],waitlist.c.state=='waiting').values(state='expired'))
+                else: valid.append(row)
+            return valid[:100]
+
     async def save_waitlist_offer(self,ident,user_id,payload,flex):
         async with self.engine.begin() as conn:
             res=await conn.execute(self.insert(waitlist).values(id=ident,line_user_id=user_id,payload=json.dumps(payload),state='offered',updated_at=now_iso()).on_conflict_do_nothing(index_elements=['id']).returning(waitlist.c.id))
-            if not res.first(): return False
+            if not res.first():
+                changed=await conn.execute(update(waitlist).where(waitlist.c.id==ident,waitlist.c.line_user_id==user_id,waitlist.c.state=='waiting').values(payload=json.dumps(payload),state='offered',updated_at=now_iso()))
+                if not changed.rowcount: return False
             await self._enqueue(conn,'waitlist-offer:'+ident,user_id,json.dumps(flex),'flex:'+ident)
             return True
 
@@ -238,7 +271,9 @@ class Database:
             res=await conn.execute(update(waitlist).where(waitlist.c.id==ident,waitlist.c.line_user_id==user_id,waitlist.c.state=='offered').values(state=state,updated_at=now_iso()))
             if not res.rowcount: return False
             await self._enqueue(conn,'waitlist-response:'+ident,settings.ADMIN_USER_ID,notice)
-            await self._enqueue(conn,'sheet-response:'+ident,'sheets',json.dumps({'id':ident,'status':'承諾' if state=='accepted' else '辞退'}),'sheet')
+            stored=(await conn.execute(select(waitlist.c.payload).where(waitlist.c.id==ident))).scalar()
+            if json.loads(stored).get('source')!='chat':
+                await self._enqueue(conn,'sheet-response:'+ident,'sheets',json.dumps({'id':ident,'status':'承諾' if state=='accepted' else '辞退'}),'sheet')
             return True
 
     async def review_booking(self,public_id,state,calendar_id=''):

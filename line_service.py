@@ -5,6 +5,7 @@ LINEメッセージの処理と予約フローの管理
 
 import asyncio
 import uuid
+from availability_search import filters_from, matching, filter_label
 import json
 from async_services import google_call
 from booking_rules import parse_slot, REASONS
@@ -376,7 +377,8 @@ class LINEService:
             return
 
         # ---- デフォルトレスポンス ----
-        await self._handle_default(reply_token)
+        from conversation_extras import clarify
+        await clarify(self,reply_token)
 
     # ============================================================
     # Follow event
@@ -431,24 +433,36 @@ class LINEService:
         """Keep inquiries and booking selections in the same draft."""
         dates = self._parse_multiple_dates(text)
         if not dates:
-            await self.reply_text(reply_token, '📅 ご希望の日を教えてください😊\n「明日」「来週の土曜」「9/26」などで大丈夫です。')
+            from conversation_extras import clarify
+            await clarify(self,reply_token)
             return
         data = dict(data)
+        prior=await db.get_session(user_id)
+        prior_data=json.loads(prior['flow_data']) if prior and prior.get('flow_type')=='booking' else {}
+        if prior_data.get('picker_dates'):
+            history=list(data.get('search_history',[]))
+            history.append({key:prior_data[key] for key in ('picker_dates','date','store','time','filters','preferred_stores') if key in prior_data})
+            data['search_history']=history[-5:]
+        data['filters']=filters_from(text,data.get('filters'))
         data['picker_id'] = uuid.uuid4().hex
         data['picker_filter'] = text
-        data['picker_dates'] = [d.strftime('%Y-%m-%d') for d in dates[:31]]
+        data['picker_dates'] = [d.strftime('%Y-%m-%d') for d in dates[:63]]
         data['store'] = data.get('store') or 'both'
-        for key in ('time', 'pending_time', 'room'):
+        for key in ('time', 'pending_time', 'room', 'requested_time'):
             data.pop(key, None)
         if len(dates) == 1:
             data['date'] = data['picker_dates'][0]
         else:
             data.pop('date', None)
         state = 'select_time' if len(dates) == 1 and data['store'] in STORE_NAMES else 'select_store_after_date'
-        await db.set_session(user_id, 'booking', state, json.dumps(data))
         requested = self._extract_time(text)
-        exact_request = requested and not any(word in text for word in ('以降', 'まで', '午前', '午後', '夕方', '夜')) and len(dates) == 1 and data['store'] in STORE_NAMES
+        specific_time = requested and not any(word in text for word in ('以降', 'まで', '午前', '午後', '夕方', '夜')) and len(dates) == 1
+        if specific_time: data['requested_time'] = '%02d:%02d' % requested
+        await db.set_session(user_id, 'booking', state, json.dumps(data))
+        exact_request = specific_time and data['store'] in STORE_NAMES
         if exact_request:
+            data['filters']={}
+            await db.set_session(user_id, 'booking', state, json.dumps(data))
             slots = get_available_slots(dates[0], data['store'], await self._get_bookings())
             if any((slot.hour, slot.minute) == requested for slot in slots):
                 customer = await google_call(sheets_service.get_customer_by_line_id, user_id)
@@ -462,38 +476,58 @@ class LINEService:
         stores = [only_store] if only_store else ([data['store']] if data['store'] in STORE_NAMES else list(STORE_NAMES))
         dates = data['picker_dates']
         cards = []
+        displayed=[]
+        rows=[(date,store,note) for date in dates[date_offset:date_offset+(1 if only_store else 4)] for store in stores]
+        def slots_for(date,store):
+            return matching(get_available_slots(datetime.strptime(date,'%Y-%m-%d'),store,snapshot),data.get('filters',filters_from(data.get('picker_filter',''))))
+        # Offer alternatives using this same Calendar snapshot; never reserve them.
+        if len(dates)==1 and not only_store and not any(slots_for(date,store) for date,store,_ in rows):
+            preferred=data.get('preferred_stores') or stores
+            other=[s for s in STORE_NAMES if s not in stores]
+            for store in other:
+                if slots_for(dates[0],store): rows.append((dates[0],store,'💡 同じ日なら、こちらの店舗が空いています😊'))
+            first=datetime.strptime(dates[0],'%Y-%m-%d')
+            for offset in range(1,8):
+                date=(first+timedelta(days=offset)).strftime('%Y-%m-%d')
+                available=next((store for store in preferred if slots_for(date,store)),None)
+                if available:
+                    rows.append((date,available,'💡 別の日なら、こちらはいかがですか？😊'))
+                    break
+        if data.get('preferred_stores') and len(stores)==2:
+            # The first preference wins whenever it has a matching slot that day.
+            first,second=data['preferred_stores']
+            rows=[r for r in rows if r[1]!=second or not slots_for(r[0],first)]
         async def button(label, payload):
             payload = dict(payload, picker_id=data['picker_id'])
             if payload['a'] == 'picker_page':
-                payload['picker'] = {key: data[key] for key in ('picker_id', 'picker_dates', 'store', 'picker_filter') if key in data}
+                payload['picker'] = {key: data[key] for key in ('picker_id', 'picker_dates', 'store', 'picker_filter','filters','preferred_stores') if key in data}
+                if payload.get('date'):
+                    payload['picker']['picker_dates']=[payload['date']]
+                    payload['date_offset']=0
             action = await db.make_action(uid, payload, ttl=7*24*60)
             return {'type': 'button', 'height': 'sm', 'style': 'secondary', 'action': {'type': 'postback', 'label': label, 'data': action}}
-        for date in dates[date_offset:date_offset + (1 if only_store else 4)]:
+        for date,store,row_note in rows:
             day = datetime.strptime(date, '%Y-%m-%d')
-            for store in stores:
-                slots = get_available_slots(day, store, snapshot)
-                query = data.get('picker_filter', '')
-                after = re.search(r'(\d{1,2})時以降', query)
-                if after:
-                    slots = [slot for slot in slots if slot.hour >= int(after.group(1))]
-                elif '午前' in query or '朝' in query:
-                    slots = [slot for slot in slots if slot.hour < 12]
-                elif '午後' in query:
-                    slots = [slot for slot in slots if slot.hour >= 12]
-                elif '夜' in query or '夕方' in query:
-                    slots = [slot for slot in slots if slot.hour >= 17]
-                body = [{'type': 'text', 'text': '📅 '+day.strftime('%m/%d')+'（'+WEEKDAY_JP[day.weekday()]+'）', 'weight': 'bold', 'size': 'lg'},
-                        {'type': 'text', 'text': '📍 '+STORE_NAMES[store], 'margin': 'md'},
-                        {'type': 'text', 'text': note or ('空き時間をタップしてください👇' if slots else '🌿 この日の空きはありません。別の日も聞いてくださいね。'), 'wrap': True, 'size': 'sm', 'margin': 'md'}]
-                for slot in slots[slot_offset:slot_offset+10]:
-                    body.append(await button('🕐 '+slot.strftime('%H:%M'), {'a':'pick_slot', 'date':date, 'store':store, 'time':slot.strftime('%H:%M')}))
-                if len(slots) > slot_offset+10:
-                    body.append(await button('次の時間を見る ➡️', {'a':'picker_page', 'date_offset':dates.index(date), 'slot_offset':slot_offset+10, 'store':store}))
-                if slot_offset:
-                    body.append(await button('最初の時間へ ↩️', {'a':'picker_page', 'date_offset':dates.index(date), 'slot_offset':0, 'store':store}))
-                cards.append({'type':'bubble', 'body':{'type':'box','layout':'vertical','spacing':'sm','contents':body}})
+            slots = slots_for(date,store)
+            body = [{'type': 'text', 'text': '📅 '+day.strftime('%m/%d')+'（'+WEEKDAY_JP[day.weekday()]+'）', 'weight': 'bold', 'size': 'lg'},
+                    {'type': 'text', 'text': '📍 '+STORE_NAMES[store], 'margin': 'md'},
+                    {'type': 'text', 'text': row_note or ('空き時間をタップしてください👇'+('（'+filter_label(data.get('filters',{}))+'）' if data.get('filters') else '') if slots else '🌿 この日の空きはありません。別の日も聞いてくださいね。'), 'wrap': True, 'size': 'sm', 'margin': 'md'}]
+            for slot in slots[slot_offset:slot_offset+10]:
+                displayed.append(slot.strftime('%H:%M'))
+                body.append(await button('🕐 '+slot.strftime('%H:%M'), {'a':'pick_slot', 'date':date, 'store':store, 'time':slot.strftime('%H:%M')}))
+            if len(slots) > slot_offset+10:
+                body.append(await button('次の時間を見る ➡️', {'a':'picker_page', 'date_offset':0, 'date':date, 'slot_offset':slot_offset+10, 'store':store}))
+            if slot_offset:
+                body.append(await button('最初の時間へ ↩️', {'a':'picker_page', 'date_offset':0, 'date':date, 'slot_offset':0, 'store':store}))
+            cards.append({'type':'bubble', 'body':{'type':'box','layout':'vertical','spacing':'sm','contents':body}})
         if not only_store and date_offset+4 < len(dates):
             cards.append({'type':'bubble','body':{'type':'box','layout':'vertical','contents':[await button('次の日程を見る ➡️', {'a':'picker_page','date_offset':date_offset+4,'slot_offset':0})]}})
+        current=await db.get_session(uid)
+        if current and current.get('flow_type')=='booking':
+            current_data=json.loads(current['flow_data'])
+            if current_data.get('picker_id')==data.get('picker_id'):
+                current_data['last_shown']=displayed
+                await db.set_session(uid,'booking',current['flow_state'],json.dumps(current_data))
         await self.reply_messages(token, [FlexMessage(alt_text='📅 空き時間を選んで仮予約へ😊', contents=FlexContainer.from_dict({'type':'carousel','contents':cards}))])
 
     async def _handle_date_query(
@@ -762,10 +796,8 @@ class LINEService:
                     await self._process_select_date(reply_token, user_id, session, text, data)
                     return
 
-                await self.reply_text(
-                    reply_token,
-                    "時間の形式が正しくありません。\n例: 10:00 / 19時\n\n別の日時なら「2/20」のように入力してね！",
-                )
+                from conversation_extras import clarify
+                await clarify(self,reply_token)
                 return
 
             hour, minute = t
@@ -855,7 +887,10 @@ class LINEService:
             await db.set_session(user_id, 'booking', 'confirm', json.dumps(data))
             action = await db.make_action(user_id, {'a':'picker_confirm','confirmation_id':data['confirmation_id']})
             confirm_msg = confirm_msg.replace('よろしければ「確定」を押してください👇', 'スタッフ確認前の仮予約です。\n内容がよければ下のボタンを押してください😊')
-            await self.reply_flex(reply_token, '📋 仮予約の内容確認', self._build_confirm_flex('📋 仮予約の内容確認', confirm_msg, '✅ 仮予約を申し込む', action, '#15803D'))
+            card=self._build_confirm_flex('📋 仮予約の内容確認', confirm_msg, '✅ 仮予約を申し込む', action, '#15803D')
+            for label,text in [('📅 日時を変更','日時を変更したい'),('📍 店舗を変更','店舗を変更したい')]:
+                card['footer']['contents'].insert(-1,{'type':'button','height':'sm','action':{'type':'message','label':label,'text':text}})
+            await self.reply_flex(reply_token, '📋 仮予約の内容確認', card)
 
         elif state == "resolve_room_conflict":
             if "変更する" in text:
@@ -1280,11 +1315,11 @@ class LINEService:
 
         await self.reply_text(
             reply_token,
-            "【 TOPFORM BOT 】\n\n"
-            "以下のメニューからお選びください。\n\n"
-            "■ 予約する\n"
-            "■ 予約確認\n"
-            "■ 早見表\n\n"
+            "🤖 TOPFORM 予約Bot\n\n"
+            "どんなご希望ですか？😊\n\n"
+            "📅 予約する\n"
+            "📖 予約確認\n"
+            "📋 早見表\n\n"
             "※ 日時を入力すると空き状況も確認できます。\n"
             "(例:「2/20空いてる？」「明日空き」)",
             quick_reply=quick_reply,
