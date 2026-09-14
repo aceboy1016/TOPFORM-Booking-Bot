@@ -307,13 +307,11 @@ class LINEService:
                 )
                 return
 
-        if text in ("キャンセル", "やめる", "操作をやめる"):
-            await db.clear_session(user_id)
-            await self.reply_text(reply_token, "操作をキャンセルしました。")
-            return
-
-        # Check for active session
         session = await db.get_session(user_id)
+        from conversation import route, normalize
+        text = normalize(text)
+        if await route(self, event, user, session):
+            return
 
         if "店舗変更" in text:
             if session and session.get('flow_type')=='booking':
@@ -871,11 +869,11 @@ class LINEService:
                 await self.reply_text(reply_token, "予約を中断しました。メニューから新しく選んでください。")
                 return
             elif state == "select_date":
-                # Back to Store Selection
-                for key in ('store','date','time','room','pending_time','was_both'):
+                # Preserve date and target while stepping back to store selection.
+                for key in ('time','room','pending_time','was_both'):
                     data.pop(key,None)
                 await db.set_session(user_id,'booking','select_store',json.dumps(data))
-                await self.reply_text(reply_token,'変更後の店舗を選択してください。恵比寿店・半蔵門店・両店舗から選べます。')
+                await self.reply_text(reply_token,'店舗を選択してください。恵比寿店・半蔵門店・両店舗から選べます。入力済みの日付は引き継ぎます。')
                 return
             elif state == "select_store_after_date":
                 # Back to Date Selection
@@ -952,6 +950,9 @@ class LINEService:
             await db.set_session(
                 user_id, "booking", "select_date", json.dumps(data)
             )
+            if data.get('date'):
+                await self._process_select_date(reply_token,user_id,session,data['date'],data)
+                return
 
             if store == "both":
                 await self.reply_text(
@@ -1240,7 +1241,7 @@ class LINEService:
                 )
 
         elif state == "confirm":
-            if text.strip().upper() in ("確定", "確定する", "はい", "OK", "予約する"):
+            if text.strip().upper() in ("確定", "確定する", "はい", "OK", "予約する", "お願いします", "はい、お願いします", "はいお願いします"):
                 mode = data.get("mode", "booking")
                 target_id = data.get("target_booking_id")
                 target_type = data.get("target_booking_type")
@@ -1268,10 +1269,16 @@ class LINEService:
                         await self.reply_text(reply_token,'元の予約の状態または変更期限が変わりました。予約変更の一覧からやり直してください。')
                         return
                     metadata['change_from']={'id':original['id'],'type':original['type'],'dt':original['dt'].isoformat(),'store':original['store']}
+                from booking_view import user_bookings
+                existing = [b for b in await user_bookings(self,user_id,user)
+                            if b['dt']==slot and b['store']==store]
+                if existing:
+                    await self.reply_text(reply_token,'同じ日時・店舗の予約は受付済みです。新しい予約は追加していません。\n予約確認から内容をご確認ください。')
+                    return
                 booking_id=await db.save_booking(user_id,store,slot_datetime,'provisional',metadata)
 
-                # Clear session
-                await db.clear_session(user_id)
+                from conversation import remember
+                await remember(user_id, booking_id, metadata)
                 self._invalidate_cache()
 
                 # Parse for display
@@ -1801,6 +1808,7 @@ class LINEService:
                 "date_str": date_str,
                 "time_str": start_time,
                 "end_time": end_time,
+                "store_explicit": bool(store_raw),
                 "store": store,
                 "display": display,
             })
@@ -1810,8 +1818,35 @@ class LINEService:
     async def _handle_bulk_booking(self,reply_token,user_id,user,entries):
         if len(entries)>20:
             await self.reply_text(reply_token,'一度に指定できる予約は20件までです。');return
+        session = await db.get_session(user_id)
+        data = json.loads(session.get('flow_data','{}')) if session else {}
+        if session and session.get('flow_type')=='booking' and data.get('mode')=='change':
+            if len(entries)!=1:
+                await self.reply_text(reply_token,'1件の予約変更には、変更後の日時を1つ指定してください。元の予約は残っています。')
+                return
+            entry=entries[0]
+            try:
+                slot=parse_slot(entry['date_str'],entry['time_str'])
+                if parse_slot(entry['date_str'],entry['end_time'])-slot!=timedelta(hours=1):
+                    raise ValueError('1枠60分で指定してください。')
+            except (ValueError,TypeError):
+                await self.reply_text(reply_token,'有効な日時を1枠60分で指定してください。元の予約は残っています。')
+                return
+            store=entry['store'] if entry.get('store_explicit',True) else data.get('store')
+            if store not in STORE_NAMES:
+                await self.reply_text(reply_token,'変更後の店舗を指定してください。恵比寿店・半蔵門店から選べます。')
+                return
+            data.update(store=store,date=entry['date_str'])
+            for key in ('room','pending_time','time'):
+                data.pop(key,None)
+            await self._handle_booking_flow(reply_token,user_id,user,
+                {'flow_state':'select_time','flow_data':json.dumps(data)},entry['time_str'])
+            return
+        from booking_view import user_bookings
+        existing={(b['dt'],b['store']):b for b in await user_bookings(self,user_id,user)}
         snapshot=await self._get_bookings(force=True)
-        results=[];seen=set()
+        results=[];seen=set();last=None
+
         for entry in entries:
             try:
                 slot=parse_slot(entry['date_str'],entry['time_str'])
@@ -1820,15 +1855,21 @@ class LINEService:
                 key=(slot,entry['store'])
                 if key in seen: continue
                 seen.add(key)
+                if key in existing:
+                    results.append(f"受付済み（追加なし）: {slot.strftime('%m/%d %H:%M')} {STORE_NAMES[entry['store']]}")
+                    continue
                 result=check_availability(slot,entry['store'],snapshot)
                 if not result['is_available']: raise ValueError(REASONS.get(result.get('reason'),'空きがありません。'))
                 room=user.get('room_pref')
                 if entry['store']!='ebisu' or room not in result.get('rooms_available',[]): room=None
                 bid=await db.save_booking(user_id,entry['store'],slot.isoformat(),'provisional',{'room':room,'customer_name':user.get('display_name','')})
+                last=bid
                 results.append(f"受付 No.{bid}: {slot.strftime('%m/%d %H:%M')} {STORE_NAMES[entry['store']]}")
             except ValueError as exc:
                 results.append(f"受付不可 {entry['date_str']} {entry['time_str']}: {exc}")
-        await db.clear_session(user_id)
+        if last:
+            from conversation import remember
+            await remember(user_id,last,{})
         self._invalidate_cache()
         await self.reply_text(reply_token,'仮予約の受付結果\n'+'\n'.join(results)+'\nスタッフ確認後に確定します。')
 

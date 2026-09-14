@@ -1,12 +1,15 @@
 """Date parsing without losing month/year or relative-week context."""
 import calendar
 import re
+import unicodedata
 from datetime import datetime, timedelta
 from booking_rules import JST, as_jst
 
 def parse_dates(text: str, now: datetime | None = None) -> list[datetime]:
     now = as_jst(now or datetime.now(JST))
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    text = unicodedata.normalize('NFKC', text)
+    text = re.sub(r'((?:\d{4}[/年-])?\d{1,2}[/月.-]\d{1,2}日?)\s*(?:[（(]?[月火水木金土日]曜(?:日)?[）)]?|[（(][月火水木金土日][）)])', r'\1', text)
     dates = set()
     def add(y, m, d):
         try: dates.add(JST.localize(datetime(y, m, d)))
