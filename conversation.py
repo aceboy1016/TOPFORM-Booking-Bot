@@ -34,7 +34,7 @@ def matches_date(booking, dates):
 
 
 def label(booking):
-    return booking['dt'].strftime('%m/%d %H:%M') + ' ' + STORE_NAMES[booking['store']]
+    return '📅 ' + booking['dt'].strftime('%m/%d') + '（' + '月火水木金土日'[booking['dt'].weekday()] + '）\n🕐 ' + booking['dt'].strftime('%H:%M') + '\n📍 ' + STORE_NAMES[booking['store']]
 
 
 async def remember(uid, ident, data):
@@ -46,7 +46,7 @@ async def remember(uid, ident, data):
 
 async def begin_change(service, token, uid, user, booking, desired=None):
     if cancel_band(booking['dt']) != 'normal':
-        await service.reply_text(token, '開始12時間以内の予約変更は担当者へご相談ください。元の予約は残っています。')
+        await service.reply_text(token, '⏰ 開始12時間以内の予約変更は、担当者へご相談ください。\n\n📅 元の予約は残っています。')
         return
     data = {'mode': 'change', 'target_booking_id': booking['id'],
             'target_booking_type': booking['type'], 'store': booking['store'],
@@ -59,21 +59,36 @@ async def begin_change(service, token, uid, user, booking, desired=None):
     if desired and service._parse_multiple_dates(desired):
         await service._process_select_date(token,uid,{},desired,data)
         return
-    await service.reply_text(token, label(booking) + ' の変更ですね。\n変更後の日時を教えてください。店舗は同じで進めます。別の店舗も指定できます。\n元の予約は変更が承認されるまで残ります。')
+    await service.reply_text(token, '🔄 ご予約の変更ですね！\n\n' + label(booking) + '\n\n✏️ 変更後の日時を教えてください😊\n店舗は同じで進めます。別の店舗も指定できます。\n\n💡 元の予約は変更が承認されるまで残ります。')
 
 
 async def choose(service, token, uid, bookings, intent, note='', desired=None):
     if not bookings:
-        await service.reply_text(token, '該当する予約が見つかりませんでした。予約日を月日で教えてください。')
+        await service.reply_text(token, '🔎 該当する予約が見つかりませんでした。\n\n予約日を「9/26」のように教えてください😊')
         return
     bubbles = []
     for booking in bookings[:10]:
         action = await db.make_action(uid, {'a': 'conversation_select', 'intent': intent,
                                             't': booking['type'], 'bid': booking['id'], 'desired':desired})
-        bubbles.append({'type': 'bubble', 'body': {'type': 'box', 'layout': 'vertical',
-                        'contents': [{'type':'text','text':'取り消す予約を選択' if intent=='cancel' else '変更する予約を選択','size':'sm'}, {'type': 'text', 'text': label(booking), 'wrap': True}]},
-                        'footer': {'type': 'box', 'layout': 'vertical', 'contents': [
-                            {'type': 'button', 'action': {'type': 'postback', 'label': 'この予約を選ぶ', 'data': action}}]}})
+        cancel = intent == 'cancel'
+        color = '#B45309' if cancel else '#167D8D'
+        dt = booking['dt']
+        bubbles.append({
+            'type':'bubble','size':'kilo',
+            'header':{'type':'box','layout':'vertical','backgroundColor':'#FFF7ED' if cancel else '#EAF7F7',
+                'paddingAll':'16px','contents':[{'type':'text','text':'📝 取り消すご予約' if cancel else '🔄 変更するご予約',
+                    'weight':'bold','size':'sm','color':color}]},
+            'body':{'type':'box','layout':'vertical','spacing':'md','paddingAll':'18px','contents':[
+                {'type':'text','text':'📅 '+dt.strftime('%m/%d')+'（'+'月火水木金土日'[dt.weekday()]+'）','size':'xl','weight':'bold','color':'#243447'},
+                {'type':'text','text':'🕐 '+dt.strftime('%H:%M')+'〜','size':'lg','weight':'bold','color':'#243447'},
+                {'type':'text','text':'📍 '+STORE_NAMES[booking['store']],'size':'sm','color':'#52616B'},
+                {'type':'text','text':'⏳ 仮予約・スタッフ確認待ち' if booking.get('status')=='provisional' else '✅ 確定済み',
+                    'size':'xs','color':'#52616B','wrap':True},
+                {'type':'separator','margin':'md'},
+                {'type':'text','text':note or 'こちらのご予約でよろしいですか？👇','size':'xs','color':'#52616B','wrap':True}]},
+            'footer':{'type':'box','layout':'vertical','paddingAll':'16px','contents':[
+                {'type':'button','style':'primary','color':color,'height':'sm',
+                 'action':{'type':'postback','label':'この予約の取消へ進む' if cancel else 'この予約を変更する', 'data':action}}]}})
     await db.set_session(uid, 'conversation', 'select_target', json.dumps({'intent': intent,'desired':desired}))
     await service.reply_flex(token, (note or '対象の予約を選んでください。') + (' 最初の10件です。日付でも絞り込めます。' if len(bookings)>10 else ''),
                              {'type': 'carousel', 'contents': bubbles})
@@ -93,12 +108,12 @@ async def route(service, event, user, session):
             return True
         if text in ('戻る','⬅️ 戻る','いいえ','いいえ、やめます'):
             await db.clear_session(uid)
-            await service.reply_text(token,'取り消しは実行していません。予約はそのまま残っています。')
+            await service.reply_text(token,'👌 取り消しは実行していません。\n📅 予約はそのまま残っています。')
             return True
     active = bool(session and session.get('flow_type') == 'booking')
     changing = active and data.get('mode') == 'change'
     if 'キャンセル待ち' in text:
-        await service.reply_text(token,'キャンセル待ちのご相談ですね。希望日時と店舗を添えて担当者へご相談ください。現在の予約は取り消していません。')
+        await service.reply_text(token,'🌿 キャンセル待ちのご相談ですね。\n\n📅 希望日時と📍 店舗を添えて、担当者へご相談ください。\n💡 現在の予約は取り消していません。')
         return True
     if active and text in ('時間を変更する','時間変更','時間を変える'):
         if session.get('flow_state')=='resolve_room_conflict':
@@ -115,7 +130,7 @@ async def route(service, event, user, session):
     if abort_change or (abort and active):
         if active:
             await db.clear_session(uid)
-            await service.reply_text(token, '変更の入力を中止しました。元の予約はそのまま残っています。' if changing else '予約の入力を中止しました。受付済みの予約は取り消していません。')
+            await service.reply_text(token, '👌 変更の入力を中止しました。\n\n📅 元の予約はそのまま残っています。\nまた変更したくなったら声をかけてくださいね😊' if changing else '👌 予約の入力を中止しました。\n\n📅 受付済みの予約は取り消していません。')
             return True
         if abort_change and data.get('last_request') and data.get('change_from'):
             booking = await resolve_booking(service, uid, user, 'db', data['last_request'])
@@ -124,14 +139,14 @@ async def route(service, event, user, session):
                 await cancellation_confirmation(service, token, uid, booking,
                     '変更リクエストだけを取り消します。元の予約は残ります。')
                 return True
-            await service.reply_text(token, '変更リクエストは承認済み、または受付状態が変わっています。最新の予約一覧から対象を確認してください。')
+            await service.reply_text(token, '🔎 変更リクエストは承認済み、または受付状態が変わっています。\n\n「予約確認」から最新の内容をご確認ください。')
             return True
         if abort_change:
-            await service.reply_text(token, 'どの変更リクエストを取り消すか確認が必要です。予約確認から対象の日時を教えてください。元の予約は取り消していません。')
+            await service.reply_text(token, '🔎 取り消したい変更リクエストを確認させてください。\n\n「予約確認」から対象の日時を教えてくださいね。\n💡 元の予約は取り消していません。')
             return True
     if abort and not cancel:
         await db.clear_session(uid)
-        await service.reply_text(token, '操作を終了しました。受付済みの予約はそのままです。')
+        await service.reply_text(token, '👌 操作を終了しました。\n\n📅 受付済みの予約はそのままです。\nまたいつでもご利用ください😊')
         return True
 
     # Respect explicit negation clause by clause. Dates in "残す" clauses are
@@ -142,11 +157,11 @@ async def route(service, event, user, session):
     if cancel and not positive:
         if session and session.get('flow_state')=='cancel_confirmation':
             await db.clear_session(uid)
-        await service.reply_text(token, '予約は取り消していません。変更したい内容があれば教えてください。')
+        await service.reply_text(token, '👌 この操作では予約を取り消していません。\n\n変更したい内容があれば教えてくださいね😊')
         return True
     if re.search(r'変更(?:は)?(?:しない|しません|せず|不要)', text):
         await db.clear_session(uid)
-        await service.reply_text(token, '変更の入力を終了しました。受付済みの予約はそのままです。')
+        await service.reply_text(token, '👌 変更の入力を終了しました。\n📅 受付済みの予約はそのままです。')
         return True
     intent = 'cancel' if positive else 'change' if re.search(CHANGE, text) else None
     if (not intent and not active
@@ -165,7 +180,7 @@ async def route(service, event, user, session):
     if intent:
         # Clarification after a change submission must not create another request.
         if intent == 'change' and data.get('last_request') and data.get('change_from') and not mentioned_dates(text):
-            await service.reply_text(token, '直前の受付は日程変更として受け付けています。元の予約はスタッフの承認まで残ります。変更後の日程を直す場合は、その日時を教えてください。')
+            await service.reply_text(token, '🔄 直前の受付は日程変更として受け付けています！\n\n💡 元の予約はスタッフの承認まで残ります。\n✏️ 変更後の日程を直す場合は、その日時を教えてください😊')
             return True
         if intent == 'change' and changing:
             if service._parse_multiple_dates(text):
@@ -173,7 +188,7 @@ async def route(service, event, user, session):
                     data.pop(key, None)
                 await service._process_select_date(token, uid, session, text, data)
             else:
-                await service.reply_text(token, '日程変更として進めています。変更後の日時を教えてください。元の予約は残ります。')
+                await service.reply_text(token, '🔄 日程変更として進めています！\n\n✏️ 変更後の日時を教えてください😊\n💡 元の予約は残ります。')
             return True
         bookings = await user_bookings(service, uid, user)
         dates = [d for c in positive for d in mentioned_dates(c)] if positive else mentioned_dates(text)
@@ -206,7 +221,7 @@ async def route(service, event, user, session):
         return True
 
     if active and text in ('店舗はそのまま','同じ店舗','そのままの店舗') and data.get('store') in STORE_NAMES:
-        await service.reply_text(token, STORE_NAMES[data['store']]+'で進めます。希望日時を教えてください。')
+        await service.reply_text(token, '📍 '+STORE_NAMES[data['store']]+'で進めます！\n\n✏️ 希望日時を教えてください😊')
         return True
 
     # Corrections may arrive at any input step, including final confirmation.
@@ -219,7 +234,7 @@ async def route(service, event, user, session):
             for word, store in [('恵比寿','ebisu'), ('半蔵門','hanzoomon')]:
                 if word in text: data['store'] = store
             if not data.get('store'):
-                await service.reply_text(token, '日時の変更ですね。店舗も教えてください。')
+                await service.reply_text(token, '🔄 日時の変更ですね！\n📍 ご希望の店舗も教えてください😊')
                 return True
             await service._process_select_date(token, uid, session, text, data)
             return True

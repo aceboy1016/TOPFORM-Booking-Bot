@@ -173,7 +173,7 @@ class LINEService:
                         "type": "text",
                         "text": title,
                         "weight": "bold",
-                        "color": "#ff0000",
+                        "color": "#92400E",
                         "size": "md"
                     },
                     {
@@ -188,14 +188,14 @@ class LINEService:
             },
             "footer": {
                 "type": "box",
-                "layout": "horizontal",
+                "layout": "vertical",
                 "spacing": "md",
                 "contents": [
                     {
                         "type": "button",
                         "action": {
                             "type": "postback",
-                            "label": "はい",
+                            "label": ok_label,
                             "data": ok_data,
                             "displayText": ok_label
                         },
@@ -206,7 +206,7 @@ class LINEService:
                         "type": "button",
                         "action": {
                             "type": "message",
-                            "label": "いいえ",
+                            "label": "↩️ やめて戻る",
                             "text": "操作をやめる"
                         },
                         "style": "secondary"
@@ -1608,13 +1608,14 @@ class LINEService:
         now=datetime.now(JST)
         completed=sum(b['status']=='confirmed' and b['dt'].year==now.year and b['dt'].month==now.month and b['dt']+timedelta(hours=1)<=now for b in entries)
         future=[b for b in entries if b['dt']>now]
-        lines=[f'今月の利用済み: {completed}回','予約一覧（仮予約は利用回数に含みません）']
+        lines=['📖 ご予約一覧', '', f'📊 今月の利用済み: {completed}回', f'🗓️ これからのご予約: {len(future)}件', '']
         for b in future[:20]:
-            mark='【仮】' if b['status']=='provisional' else ''
-            lines.append(b['dt'].strftime('%m/%d %H:%M')+' '+STORE_NAMES.get(b['store'],b['store'])+mark)
-        if not future: lines.append('現在の予約はありません。')
-        if len(future)>20: lines.append(f'ほか{len(future)-20}件。予約変更の一覧で確認できます。')
-        lines.append('変更・取消は「予約変更」と入力してください。')
+            status='⏳ 仮予約・スタッフ確認待ち' if b['status']=='provisional' else '✅ 確定済み'
+            lines.extend(['📅 '+b['dt'].strftime('%m/%d')+'（'+'月火水木金土日'[b['dt'].weekday()]+'）',
+                '🕐 '+b['dt'].strftime('%H:%M')+'〜  📍 '+STORE_NAMES.get(b['store'],b['store']),status,''])
+        if not future: lines.extend(['これからのご予約はまだありません🌱','「予約する」からお申し込みできます😊',''])
+        if len(future)>20: lines.extend([f'ほか{len(future)-20}件あります。予約変更の一覧で確認できます🔎',''])
+        lines.extend(['💡 仮予約は利用済み回数に含みません。','', '🔄 変更・取消は「予約変更」と送ってくださいね😊'])
         await self.reply_text(reply_token,'\n'.join(lines))
 
     async def _show_booking_change_list(
