@@ -236,3 +236,78 @@ async def test_time_change_button_keeps_booking_draft(service,database):
     s,d=await state(database)
     assert s['flow_state']=='select_time' and d['date']==dt.strftime('%Y-%m-%d')
     assert 'time' not in d
+
+async def test_screenshot_switch_no_bookings_then_new_request(service,database,monkeypatch):
+    import calendar_service
+    monkeypatch.setattr(calendar_service.calendar_service,"fetch_user_past_bookings_this_month",lambda *args:[])
+    await database.set_session('u','booking','select_date',json.dumps({'store':'ebisu'}))
+    await service.handle_text_message(event('予約変更'),user())
+    assert (await state(database))[0]['flow_type']=='conversation'
+    await service.handle_text_message(event('予約確認'),user())
+    await service.handle_text_message(event('予約する'),user())
+    s,d=await state(database)
+    assert s['flow_type']=='booking' and s['flow_state']=='select_date'
+    assert '日時が正しく' not in service.reply_text.call_args.args[1]
+    assert await database.get_user_bookings('u')==[]
+
+@pytest.mark.parametrize('text',['予約したい','予約したいです','じゃあ予約したい','新しく予約したい','予約をお願いします','予約したいんだけど'])
+async def test_new_intent_interrupts_old_draft(service,database,text):
+    await database.set_session('u','booking','select_date',json.dumps({'mode':'change','store':'ebisu','target_booking_id':'old'}))
+    await service.handle_text_message(event(text),user())
+    s,d=await state(database)
+    assert s['flow_type']=='booking' and d.get('mode')!='change'
+    assert 'target_booking_id' not in d
+    assert await database.get_user_bookings('u')==[]
+
+async def test_view_pauses_then_date_resumes_change(service,database):
+    bid,dt=await reserve(database)
+    await database.set_session('u','booking','select_date',json.dumps({'mode':'change','store':'ebisu','target_booking_id':bid}))
+    # Avoid the Calendar past-booking API in this read-only conversation test.
+    service._show_user_bookings_simple=__import__('unittest.mock',fromlist=['AsyncMock']).AsyncMock()
+    await service.handle_text_message(event('今の予約を見せて'),user())
+    assert (await state(database))[1]['paused_booking']
+    await service.handle_text_message(event((dt+timedelta(days=1)).strftime('%m/%d')),user())
+    s,d=await state(database)
+    assert d['target_booking_id']==bid and d['mode']=='change'
+
+async def test_acknowledgement_is_not_date_error(service,database):
+    await database.set_session('u','booking','select_date',json.dumps({'store':'ebisu'}))
+    await service.handle_text_message(event('ありがとうございます'),user())
+    assert '😊' in service.reply_text.call_args.args[1]
+    assert 'ご希望はいつ' in service.reply_text.call_args.args[1]
+    assert (await state(database))[0]['flow_state']=='select_date'
+
+async def test_confirmation_booking_button_still_submits(service,database):
+    dt=future()
+    await database.set_session('u','booking','confirm',json.dumps({'store':'ebisu','date':dt.strftime('%Y-%m-%d'),'time':'10:00'}))
+    await service.handle_text_message(event('予約する'),user())
+    assert len(await database.get_user_bookings('u'))==1
+
+def test_natural_half_hour(service):
+    assert service._extract_time('18時半でお願いします')==(18,30)
+
+async def test_free_text_date_before_store_retains_time(service,database):
+    dt=future()
+    await database.set_session('u','booking','select_store','{}')
+    await service.handle_text_message(event(f'{dt.month}/{dt.day}の15時半でお願いしたいです'),user())
+    assert (await state(database))[0]['flow_state']=='select_store'
+    await service.handle_text_message(event('恵比寿でお願いします'),user())
+    s,d=await state(database)
+    assert d['date']==dt.strftime('%Y-%m-%d') and d['store']=='ebisu'
+    assert '15:30' in service.reply_text.call_args.args[1]
+
+async def test_change_store_in_free_text_at_confirmation(service,database):
+    dt=future()
+    await database.set_session('u','booking','confirm',json.dumps({'store':'ebisu','mode':'change','target_booking_id':'original','date':dt.strftime('%Y-%m-%d'),'time':'10:00'}))
+    await service.handle_text_message(event('半蔵門に変更したいです'),user())
+    s,d=await state(database)
+    assert d['store']=='hanzoomon' and d['target_booking_id']=='original'
+    assert s['flow_state']=='select_time' and 'time' not in d
+
+async def test_combined_free_text_from_store_step(service,database):
+    dt=future()
+    await database.set_session('u','booking','select_store','{}')
+    await service.handle_text_message(event(f'{dt.month}/{dt.day} 15時半に恵比寿でお願いします'),user())
+    s,d=await state(database)
+    assert d['date']==dt.strftime('%Y-%m-%d') and d['store']=='ebisu'
+    assert '15:30' in service.reply_text.call_args.args[1]

@@ -64,7 +64,8 @@ async def begin_change(service, token, uid, user, booking, desired=None):
 
 async def choose(service, token, uid, bookings, intent, note='', desired=None):
     if not bookings:
-        await service.reply_text(token, '🔎 該当する予約が見つかりませんでした。\n\n予約日を「9/26」のように教えてください😊')
+        await db.set_session(uid,'conversation','select_target',json.dumps({'intent':intent,'desired':desired}))
+        await service.reply_text(token, '🔎 該当する予約が見つかりませんでした。\n\n予約済みの日時を教えてください😊\n新しく予約する場合は「予約したい」と送ってくださいね。')
         return
     bubbles = []
     for booking in bookings[:10]:
@@ -98,6 +99,43 @@ async def route(service, event, user, session):
     text = normalize(event.message.text)
     uid, token = event.source.user_id, event.reply_token
     data = json.loads(session.get('flow_data', '{}')) if session else {}
+    # Commands and conversational topic switches precede the current input step.
+    # "予約する" on the final confirmation remains the existing explicit consent.
+    compact=re.sub(r'[\s、。!！?？]+','',text)
+    viewing=bool(re.fullmatch(r'(?:今の|今ある|自分の|私の)?(?:予約確認|予約一覧|マイ予約|予約(?:を|の)?(?:確認(?:したい|する|して|お願いします)?|見せて(?:ください)?|見たい|教えて(?:ください)?|いつ(?:だっけ)?))',compact))
+    viewing = viewing or bool(re.fullmatch(r'(?:今|私の|自分の)?予約(?:って|は)?(?:いつだっけ|入ってる|ありますか|ある)',compact))
+    starting=bool(re.fullmatch(r'(?:じゃあ|では|それなら)?(?:新しく|新規で|もう一件|別で)?(?:予約する|予約したい(?:です)?|予約したいんだけど|予約を?(?:お願い(?:します|したい)?|取りたい(?:です)?))',compact))
+    explicit_new=bool(re.search(r'新しく|新規|もう一件|別で',compact))
+    if viewing:
+        paused=session if session and session.get('flow_type')=='booking' else data.get('paused_booking')
+        await db.set_session(uid,'conversation','browsing',json.dumps({'paused_booking':paused}))
+        await service._show_user_bookings_simple(token,uid,user)
+        return True
+    if starting and not (session and session.get('flow_state')=='confirm' and compact=='予約する'):
+        paused=data.get('paused_booking') or {}
+        previous=json.loads(paused.get('flow_data','{}')) if paused else data
+        store=previous.get('store')
+        if store in STORE_NAMES and not explicit_new:
+            draft={'store':store,'room_pref':user.get('room_pref')}
+            await db.set_session(uid,'booking','select_date',json.dumps(draft))
+            await service.reply_text(token,'📋 新しいご予約ですね！\n\n📍 '+STORE_NAMES[store]+'で進めます😊\n📅 ご希望はいつですか？「明日」「来週の土曜」など、普段の言い方で大丈夫です。\n\n別の店舗も指定できます。')
+        else:
+            await service._start_booking_flow(token,uid,user)
+        return True
+    if compact in ('予約変更','予約を変更したい','予約を変更したいです'):
+        await choose(service,token,uid,await user_bookings(service,uid,user),'change')
+        return True
+    if data.get('paused_booking'):
+        paused=data['paused_booking']
+        if compact in ('続き','続ける','さっきの続き','予約の続き') or service._parse_multiple_dates(text) or service._extract_time(text):
+            draft=json.loads(paused.get('flow_data','{}'))
+            await db.set_session(uid,'booking',paused['flow_state'],paused['flow_data'])
+            if compact in ('続き','続ける','さっきの続き','予約の続き'):
+                await service.reply_text(token,'😊 先ほどの'+('変更' if draft.get('mode')=='change' else '予約')+'の続きですね！\n\n📅 希望日時や📍 店舗を教えてください。入力済みの内容は引き継いでいます。')
+            else:
+                if not await route(service,event,user,paused):
+                    await service._handle_booking_flow(token,uid,user,paused,text)
+            return True
     if session and session.get('flow_state')=='cancel_confirmation':
         if text in ('はい','はい、お願いします','はいお願いします','お願いします','取り消す','取消を申請する'):
             from types import SimpleNamespace
@@ -163,6 +201,37 @@ async def route(service, event, user, session):
         await db.clear_session(uid)
         await service.reply_text(token, '👌 変更の入力を終了しました。\n📅 受付済みの予約はそのままです。')
         return True
+    # Accept supplied booking fields at any step, not only the expected one.
+    if active and not cancel and not service._parse_hayamihyo_bulk(text) and '店舗変更' not in text:
+        dates=service._parse_multiple_dates(text)
+        stores=[code for word,code in [('恵比寿','ebisu'),('半蔵門','hanzoomon')] if word in text]
+        store='both' if '両店舗' in text or 'どちらでも' in text else stores[0] if len(stores)==1 else None
+        # A correction explicitly rejects the preceding field; use its right side.
+        if re.search(r'ではなく|じゃなく',text):
+            text=re.split(r'ではなく|じゃなく',text)[-1]
+            dates=service._parse_multiple_dates(text)
+            stores=[code for word,code in [('恵比寿','ebisu'),('半蔵門','hanzoomon')] if word in text]
+            store=stores[0] if len(stores)==1 else None
+        if dates or store:
+            if store: data['store']=store
+            for key in ('time','pending_time','room','suggested_dates'):
+                data.pop(key,None)
+            if not data.get('store'):
+                if len(dates)==1: data['date']=dates[0].strftime('%Y-%m-%d')
+                data['pending_datetime_text']=text
+                await db.set_session(uid,'booking','select_store',json.dumps(data))
+                await service.reply_text(token,'📅 希望日時を受け取りました！\n\n📍 店舗は恵比寿店・半蔵門店のどちらにしますか？両店舗でも大丈夫です😊')
+            elif dates or data.get('date') or data.get('pending_datetime_text'):
+                requested=text if dates else data.pop('pending_datetime_text',None) or data['date']
+                await service._process_select_date(token,uid,session,requested,data)
+            else:
+                await db.set_session(uid,'booking','select_date',json.dumps(data))
+                await service.reply_text(token,'📍 '+('両店舗' if data['store']=='both' else STORE_NAMES[data['store']])+'ですね！\n\n📅 ご希望はいつですか？普段の言い方で教えてください😊')
+            return True
+        if service._extract_time(text) and data.get('date') and data.get('store') in STORE_NAMES:
+            await service._handle_booking_flow(token,uid,user,dict(session,flow_state='select_time'),text)
+            return True
+
     intent = 'cancel' if positive else 'change' if re.search(CHANGE, text) else None
     if (not intent and not active
             and re.search(r'やっぱり|やはり|訂正|じゃなく', text)):
@@ -222,6 +291,14 @@ async def route(service, event, user, session):
 
     if active and text in ('店舗はそのまま','同じ店舗','そのままの店舗') and data.get('store') in STORE_NAMES:
         await service.reply_text(token, '📍 '+STORE_NAMES[data['store']]+'で進めます！\n\n✏️ 希望日時を教えてください😊')
+        return True
+
+    if active and compact in ('ありがとう','ありがとうございます','了解','了解です','わかりました','分かりました','はい','どうすればいい','何を入力すればいい','何を入力すればいいですか') and session.get('flow_state')!='confirm':
+        prompts={'select_store':'📍 ご希望は恵比寿店・半蔵門店のどちらですか？両店舗でも大丈夫です。',
+                 'select_store_after_date':'📍 ご希望の店舗を教えてください。',
+                 'select_time':'🕐 ご希望の時間を教えてください。「15時」「18時半」などで大丈夫です。',
+                 'select_date':'📅 ご希望はいつですか？「明日」「来週の土曜」などで大丈夫です。'}
+        await service.reply_text(token,'😊 はい！\n\n'+prompts.get(session.get('flow_state'),'希望の日時を教えてくださいね。')+'\n\n途中でも「予約確認」「新しく予約したい」と話しかけられます。')
         return True
 
     # Corrections may arrive at any input step, including final confirmation.
