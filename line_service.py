@@ -463,7 +463,10 @@ class LINEService:
         dates = data['picker_dates']
         cards = []
         async def button(label, payload):
-            action = await db.make_action(uid, dict(payload, picker_id=data['picker_id']))
+            payload = dict(payload, picker_id=data['picker_id'])
+            if payload['a'] == 'picker_page':
+                payload['picker'] = {key: data[key] for key in ('picker_id', 'picker_dates', 'store', 'picker_filter') if key in data}
+            action = await db.make_action(uid, payload, ttl=7*24*60)
             return {'type': 'button', 'height': 'sm', 'style': 'secondary', 'action': {'type': 'postback', 'label': label, 'data': action}}
         for date in dates[date_offset:date_offset + (1 if only_store else 4)]:
             day = datetime.strptime(date, '%Y-%m-%d')

@@ -61,20 +61,37 @@ async def handle_action(service,event,user):
     if action in ('pick_slot', 'picker_page', 'picker_confirm'):
         session = await db.get_session(uid)
         context = json.loads(session.get('flow_data', '{}')) if session else {}
-        valid = session and session.get('flow_type') == 'booking'
         if action == 'picker_confirm':
-            valid = valid and session.get('flow_state') == 'confirm' and context.get('confirmation_id') == data.get('confirmation_id')
-        else:
-            valid = valid and context.get('picker_id') == data.get('picker_id') and session.get('flow_state') in ('select_time', 'select_store_after_date')
-        if not valid:
-            await service.reply_text(token, '🌿 この選択は終了しています。ご希望の日をもう一度教えてくださいね😊')
-            return
-        if action == 'picker_confirm':
+            valid = session and session.get('flow_type') == 'booking' and session.get('flow_state') == 'confirm' and context.get('confirmation_id') == data.get('confirmation_id')
+            if not valid:
+                await service.reply_text(token, '🌿 この申込み確認は終了しています。時間を選び直すと、新しい確認を表示できます😊')
+                return
             await service._handle_booking_flow(token, uid, user, session, '確定する')
         elif action == 'picker_page':
-            await service._show_available_cards(token, uid, context, data['date_offset'], data['slot_offset'], data.get('store'))
+            source = data.get('picker') or (context if context.get('picker_id') == data.get('picker_id') else None)
+            if not source:
+                await service.reply_text(token, '📅 この一覧は更新が必要です。ご希望の日を教えてください😊')
+                return
+            await service._show_available_cards(token, uid, source, data['date_offset'], data['slot_offset'], data.get('store'))
         else:
+            # Time cards describe an option, not permission to submit. Reuse them
+            # in the current draft and require a fresh final confirmation.
+            paused = context.get('paused_booking')
+            if paused:
+                session = paused
+                context = json.loads(paused['flow_data'])
+            if session and session.get('flow_state') == 'select_target' and context.get('intent') in ('change', 'cancel'):
+                await service.reply_text(token, '🔄 先に変更・取消の対象予約を選んでください😊\nそのあと、前の時間カードも選べます。')
+                return
+            if not session or session.get('flow_type') != 'booking':
+                context = {'room_pref': user.get('room_pref')}
+            for key in ('time', 'pending_time', 'room', 'confirmation_id', 'pending_datetime_text'):
+                context.pop(key, None)
             context.update(date=data['date'], store=data['store'])
+            snapshot = await service._get_bookings(force=True)
+            if not check_availability(parse_slot(data['date'],data['time']),data['store'],snapshot)['is_available']:
+                await service._process_select_date(token, uid, session or {}, data['date'], context)
+                return
             await db.set_session(uid, 'booking', 'select_time', json.dumps(context))
             await service._handle_booking_flow(token, uid, user, await db.get_session(uid), data['time'])
         return
