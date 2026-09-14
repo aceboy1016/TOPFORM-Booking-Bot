@@ -3,12 +3,15 @@
 Queries use one indexed field; sorting small per-user result sets happens locally.
 No paid TTL, PITR or managed backup features are enabled by this adapter.
 """
+import asyncio
+import random
 import copy
 import hashlib
 import inspect
 import json
 import uuid
 from datetime import datetime, timedelta
+from google.api_core.exceptions import Aborted
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from config import settings
@@ -75,7 +78,16 @@ class FirestoreDatabase:
             result = await operation(unit)
             unit.flush()
             return result
-        return await apply(self.client.transaction(max_attempts=5))
+        # Retry only explicit aborts (nothing committed), with jitter so competing
+        # workers do not repeatedly restart in lockstep. Other errors propagate.
+        for attempt in range(5):
+            try:
+                return await apply(self.client.transaction(max_attempts=1))
+            except (Aborted, ValueError) as exc:
+                aborted = isinstance(exc, Aborted) or isinstance(exc.__cause__, Aborted)
+                if not aborted or attempt == 4:
+                    raise
+                await asyncio.sleep(random.uniform(0.05, 0.2) * (2 ** attempt))
 
     async def _rows(self, table, field=None, value=None, limit=None):
         query = self.collection(table)

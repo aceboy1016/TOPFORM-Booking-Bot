@@ -81,3 +81,16 @@ async def test_notification_is_claimed_by_only_one_worker(database):
     await database.enqueue('parallel-notice','u','message')
     batches=await asyncio.gather(database.pending_notifications(),database.pending_notifications())
     assert sum(map(len,batches))==1
+
+async def test_eight_concurrent_booking_deliveries_save_once(database):
+    token=current_event.set('eight-parallel-deliveries')
+    try:
+        ids=await asyncio.gather(*[
+            database.save_booking('u','ebisu','2026-10-01T10:00:00+09:00')
+            for _ in range(8)
+        ])
+    finally:
+        current_event.reset(token)
+    assert len(set(ids))==1
+    assert len(await database.get_user_bookings('u',include_past=True))==1
+    assert len(await database.pending_notifications())==1
