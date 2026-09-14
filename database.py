@@ -116,10 +116,11 @@ class Database:
             stmt=self.insert(bookings).values(line_user_id=line_user_id,store=store,slot_datetime=slot_datetime,status=status,metadata=json.dumps(extra,ensure_ascii=False),created_at=now_iso(),request_key=key,public_id=str(uuid.uuid4())).on_conflict_do_nothing(index_elements=['request_key'])
             await conn.execute(stmt)
             row=(await conn.execute(select(bookings).where(bookings.c.request_key==key))).mappings().one()
-            summary=f"予約リクエスト No.{row['id']}\nお名前: {extra.get('customer_name',line_user_id)}\n日時: {slot_datetime}\n店舗: {store}\n個室希望: {extra.get('room','指定なし')}"
-            if extra.get('change_from'): summary+=f"\n変更前: {extra['change_from']}\n旧予約は本変更完了まで保持しています。"
-            summary+='\nスタッフ確認後、カレンダー登録・承認をお願いします。'
-            await self._enqueue(conn,'booking:'+key,settings.ADMIN_USER_ID,summary)
+            from booking_cards import admin_notification
+            notice,records=admin_notification(dict(row))
+            for record in records:
+                await conn.execute(self.insert(actions).values(**record).on_conflict_do_nothing(index_elements=['id']))
+            await self._enqueue(conn,'booking:'+key,settings.ADMIN_USER_ID,json.dumps(notice,ensure_ascii=False),'card')
             return row['id']
 
     async def get_user_bookings(self,line_user_id,include_past=False):
@@ -289,7 +290,8 @@ class Database:
             original=extra.get('change_from',{})
             if state=='confirmed' and original.get('type')=='db':
                 await conn.execute(update(bookings).where(bookings.c.public_id==original['id'],bookings.c.line_user_id==row['line_user_id']).values(status='superseded'))
-            await self._enqueue(conn,'review:'+public_id,row['line_user_id'],f"予約{'が確定しました' if state=='confirmed' else 'をお取りできませんでした'}。\n{row['slot_datetime']} {row['store']}")
+            from booking_cards import result_card
+            await self._enqueue(conn,'review:'+public_id,row['line_user_id'],json.dumps(result_card(dict(row),state),ensure_ascii=False),'card')
             return True
 
     async def pending_bookings(self):

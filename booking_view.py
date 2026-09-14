@@ -15,10 +15,12 @@ async def user_bookings(service,user_id,user,include_past=False):
     unique={b.id:b for b in cal}
     result=[]
     cancelled_signatures=set()
+    pending_signatures={(as_jst(datetime.fromisoformat(r['slot_datetime'])),r['store']) for r in rows if r['status']=='provisional'}
     for b in unique.values():
         if await db.is_done('calendar-cancel:'+user_id+':'+b.id):
             cancelled_signatures.add((b.start_dt,b.store))
             continue
+        if (b.start_dt,b.store) in pending_signatures: continue
         if not include_past and b.start_dt<=now: continue
         result.append({'id':b.id,'type':'cal','dt':b.start_dt,'store':b.store,'status':'confirmed'})
     cal_ids={b['id'] for b in result}

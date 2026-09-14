@@ -164,12 +164,12 @@ class FirestoreDatabase:
                            metadata=json.dumps(extra, ensure_ascii=False), created_at=now_iso(),
                            confirmed_at=None, cancelled_at=None)
                 unit.put(ref, row)
-            summary = (f"予約リクエスト No.{row['id']}\nお名前: {extra.get('customer_name', line_user_id)}"
-                       f"\n日時: {slot_datetime}\n店舗: {store}\n個室希望: {extra.get('room', '指定なし')}")
-            if extra.get('change_from'):
-                summary += f"\n変更前: {extra['change_from']}\n旧予約は本変更完了まで保持しています。"
-            await self._enqueue(unit, 'booking:' + key, settings.ADMIN_USER_ID,
-                                summary + '\nスタッフ確認後、カレンダー登録・承認をお願いします。')
+            from booking_cards import admin_notification
+            notice,records=admin_notification(row)
+            for record in records:
+                action_ref=self.ref('action_tokens',record['id'])
+                if await unit.get(action_ref) is None: unit.put(action_ref,record)
+            await self._enqueue(unit,'booking:'+key,settings.ADMIN_USER_ID,json.dumps(notice,ensure_ascii=False),'card')
             return row['id']
         return await self._run(operation)
 
@@ -408,8 +408,8 @@ class FirestoreDatabase:
                 if old and old['line_user_id'] == row['line_user_id']:
                     old['status'] = 'superseded'
                     unit.put(old_ref, old)
-            await self._enqueue(unit, 'review:' + public_id, row['line_user_id'],
-                                f"予約{'が確定しました' if state == 'confirmed' else 'をお取りできませんでした'}。\n{row['slot_datetime']} {row['store']}")
+            from booking_cards import result_card
+            await self._enqueue(unit,'review:'+public_id,row['line_user_id'],json.dumps(result_card(row,state),ensure_ascii=False),'card')
             return True
         return await self._run(operation)
 

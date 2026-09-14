@@ -98,7 +98,7 @@ async def test_booking_view_deduplicates(service,database,monkeypatch):
     booking=Booking('cal',day,day+timedelta(hours=1),'ebisu','架空太郎（恵）',source='work')
     service._get_bookings=AsyncMock(return_value=BookingData([],[],[booking]))
     entries=await user_bookings(service,'u',user())
-    assert len(entries)==1 and entries[0]['type']=='cal'
+    assert len(entries)==1 and entries[0]['type']=='db' and entries[0]['status']=='provisional'
 
 async def test_cancelled_calendar_does_not_reappear_as_db_request(service,database):
     from booking_view import user_bookings
