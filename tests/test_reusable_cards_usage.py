@@ -66,7 +66,7 @@ async def test_monthly_question_keeps_final_confirmation(service,database,monkey
     await service.handle_text_message(event(question),user())
     assert await database.get_session('u')==before
     response=service.reply_text.call_args.args[1]
-    assert '利用済み：1回' in response and 'うち仮予約 1件' in response and '今月3回目' in response
+    assert '予約件数：2件' in response and 'うち仮予約 1件' in response and '今月3回目' in response
 
 async def test_old_card_checks_current_availability(service,database,monkeypatch):
     dt=future()
