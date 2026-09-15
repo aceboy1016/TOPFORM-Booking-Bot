@@ -103,7 +103,9 @@ async def handle_action(service,event,user):
                 context = {'room_pref': user.get('room_pref')}
             for key in ('time', 'pending_time', 'room', 'confirmation_id', 'pending_datetime_text'):
                 context.pop(key, None)
+            context.pop('room_choice',None)
             context.update(date=data['date'], store=data['store'])
+            if data.get('room') in ('A','B') and data['store']=='ebisu': context['room_choice']=data['room']
             snapshot = await service._get_bookings(force=True)
             if not check_availability(parse_slot(data['date'],data['time']),data['store'],snapshot)['is_available']:
                 await service._process_select_date(token, uid, session or {}, data['date'], context)

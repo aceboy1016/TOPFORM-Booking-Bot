@@ -515,7 +515,7 @@ class LINEService:
         async def button(label, payload):
             payload = dict(payload, picker_id=data['picker_id'])
             if payload['a'] == 'picker_page':
-                payload['picker'] = {key: data[key] for key in ('picker_id', 'picker_dates', 'store', 'picker_filter','filters','preferred_stores') if key in data}
+                payload['picker'] = {key: data[key] for key in ('picker_id', 'picker_dates', 'store', 'picker_filter','filters','preferred_stores','room_pref') if key in data}
                 if payload.get('date'):
                     payload['picker']['picker_dates']=[payload['date']]
                     payload['date_offset']=0
@@ -527,10 +527,27 @@ class LINEService:
             body = [{'type': 'text', 'text': '📅 '+day.strftime('%m/%d')+'（'+WEEKDAY_JP[day.weekday()]+'）', 'weight': 'bold', 'size': 'lg'},
                     {'type': 'text', 'text': '📍 '+STORE_NAMES[store], 'margin': 'md'},
                     {'type': 'text', 'text': row_note or ('空き時間をタップしてください👇'+('（'+filter_label(data.get('filters',{}))+'）' if data.get('filters') else '') if slots else '🌿 この日の空きはありません。別の日も聞いてくださいね。'), 'wrap': True, 'size': 'sm', 'margin': 'md'}]
-            for slot in slots[slot_offset:slot_offset+10]:
-                displayed.append(slot.strftime('%H:%M'))
-                displayed_slots.append({'date':date,'store':store,'time':slot.strftime('%H:%M')})
-                body.append(await button('🕐 '+slot.strftime('%H:%M'), {'a':'pick_slot', 'date':date, 'store':store, 'time':slot.strftime('%H:%M')}))
+            page=slots[slot_offset:slot_offset+10]
+            preferred_room=data.get('room_pref') if store=='ebisu' else None
+            groups=[(None,page)]
+            if preferred_room in ('A','B'):
+                alternative='B' if preferred_room=='A' else 'A'
+                preferred_slots=[];alternative_slots=[]
+                for slot in page:
+                    available=check_availability(slot,store,snapshot).get('rooms_available',[])
+                    if preferred_room in available: preferred_slots.append(slot)
+                    elif alternative in available: alternative_slots.append(slot)
+                groups=[(preferred_room,preferred_slots),(alternative,alternative_slots)]
+            for room,room_slots in groups:
+                if room and room_slots:
+                    heading=f'🚪 ご希望の個室{room}はこちら😊' if room==preferred_room else f'💡 個室{preferred_room}が埋まっている時間も、個室{room}ならこちらが空いています😊'
+                    body.append({'type':'text','text':heading,'wrap':True,'size':'sm','weight':'bold','margin':'lg'})
+                for slot in room_slots:
+                    displayed.append(slot.strftime('%H:%M'))
+                    displayed_slots.append({'date':date,'store':store,'time':slot.strftime('%H:%M')})
+                    payload={'a':'pick_slot','date':date,'store':store,'time':slot.strftime('%H:%M')}
+                    if room: payload['room']=room
+                    body.append(await button('🕐 '+slot.strftime('%H:%M'),payload))
             if len(slots) > slot_offset+10:
                 body.append(await button('次の時間を見る ➡️', {'a':'picker_page', 'date_offset':0, 'date':date, 'slot_offset':slot_offset+10, 'store':store}))
             if slot_offset:
@@ -542,7 +559,7 @@ class LINEService:
         if current and current.get('flow_type')=='booking':
             current_data=json.loads(current['flow_data'])
             if current_data.get('picker_id')==data.get('picker_id'):
-                current_data['last_shown']=displayed
+                current_data['last_shown']=sorted(set(displayed))
                 current_data['shown_slots']=displayed_slots
                 await db.set_session(uid,'booking',current['flow_state'],json.dumps(current_data))
         await self.reply_messages(token, [FlexMessage(alt_text='📅 空き時間を選んで仮予約へ😊', contents=FlexContainer.from_dict({'type':'carousel','contents':cards}))])
@@ -820,7 +837,7 @@ class LINEService:
             hour, minute = t
             date_str = data.get("date")
             store = data.get("store", "ebisu")
-            room_pref = data.get("room_pref")
+            room_pref = data.pop("room_choice", None) or data.get("room_pref")
 
             target_date = datetime.strptime(date_str, "%Y-%m-%d")
             slot_time = JST.localize(
@@ -1348,19 +1365,21 @@ class LINEService:
     # Show user bookings (Simple Text)
     # ============================================================
     async def _show_user_bookings_simple(self,reply_token,user_id,user):
-        from booking_view import user_bookings
+        from booking_view import user_bookings, counted_reservations
         entries=await user_bookings(self,user_id,user,include_past=True)
         now=datetime.now(JST)
-        completed=sum(b['status']=='confirmed' and b['dt'].year==now.year and b['dt'].month==now.month and b['dt']+timedelta(hours=1)<=now for b in entries)
+        counted=counted_reservations(entries,await db.get_user_bookings(user_id,include_past=True))
+        month=[b for b in counted if (b['dt'].year,b['dt'].month)==(now.year,now.month)]
+        provisional=sum(b['status']=='provisional' for b in month)
         future=[b for b in entries if b['dt']>now]
-        lines=['📖 ご予約一覧', '', f'📊 今月の利用済み: {completed}回', f'🗓️ これからのご予約: {len(future)}件', '']
+        lines=['📖 ご予約一覧', '', f'📊 今月の予約: {len(month)}件（うち仮予約 {provisional}件）', f'🗓️ これからのご予約: {sum(b["dt"]>now for b in counted)}件', '']
         for b in future[:20]:
             status='⏳ 仮予約・スタッフ確認待ち' if b['status']=='provisional' else '✅ 確定済み'
             lines.extend(['📅 '+b['dt'].strftime('%m/%d')+'（'+'月火水木金土日'[b['dt'].weekday()]+'）',
                 '🕐 '+b['dt'].strftime('%H:%M')+'〜  📍 '+STORE_NAMES.get(b['store'],b['store']),status,''])
         if not future: lines.extend(['これからのご予約はまだありません🌱','「予約する」からお申し込みできます😊',''])
         if len(future)>20: lines.extend([f'ほか{len(future)-20}件あります。予約変更の一覧で確認できます🔎',''])
-        lines.extend(['💡 仮予約は利用済み回数に含みません。','', '🔄 変更・取消は「予約変更」と送ってくださいね😊'])
+        lines.extend(['💡 今月の日付の予約を数えています。仮予約を含み、取消済みは除きます。変更前後はまとめて1件です。','', '🔄 変更・取消は「予約変更」と送ってくださいね😊'])
         await self.reply_text(reply_token,'\n'.join(lines))
 
     async def _show_booking_change_list(

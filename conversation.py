@@ -113,7 +113,7 @@ async def route(service, event, user, session):
     # Commands and conversational topic switches precede the current input step.
     # "予約する" on the final confirmation remains the existing explicit consent.
     compact=re.sub(r'[\s、。!！?？]+','',text)
-    if re.search(r'何回(?:目)?|何度目|(?:今月|月の).*(?:利用回数|予約回数|回数)', compact):
+    if re.search(r'何回(?:目)?|何度目|何件|予約件数|予約数|(?:今月|月の).*(?:利用回数|予約回数|回数)', compact):
         from booking_view import monthly_usage_reply
         await monthly_usage_reply(service, token, uid, user, session)
         return True

@@ -34,6 +34,14 @@ async def user_bookings(service,user_id,user,include_past=False):
     return sorted(result,key=lambda b:b['dt'])
 
 
+def counted_reservations(entries, rows):
+    """Count a pending replacement once, without a consumption/credit ledger."""
+    visible_ids={b['id'] for b in entries}
+    replacements={(r['metadata']['change_from']['type'],r['metadata']['change_from']['id'])
+                  for r in rows if r['public_id'] in visible_ids and r.get('metadata',{}).get('change_from')}
+    return [b for b in entries if (b['type'],b['id']) not in replacements]
+
+
 async def monthly_usage_reply(service, token, uid, user, session):
     """Answer a side question without mutating the active booking draft."""
     import json
@@ -41,19 +49,14 @@ async def monthly_usage_reply(service, token, uid, user, session):
     from config import STORE_NAMES
     entries = await user_bookings(service, uid, user, include_past=True)
     now = datetime.now(JST)
-    # Pending changes replace the original in the *planned* count only.
-    # The real original booking remains untouched until staff approval.
     rows = await db.get_user_bookings(uid, include_past=True)
-    visible_ids = {b['id'] for b in entries}
-    replacements = {(r['metadata']['change_from']['type'], r['metadata']['change_from']['id'])
-                    for r in rows if r['public_id'] in visible_ids and r.get('metadata',{}).get('change_from')}
-    count_entries = [b for b in entries if b['dt']<=now or (b['type'],b['id']) not in replacements]
-    month = [b for b in count_entries if (b['dt'].year, b['dt'].month) == (now.year, now.month)]
-    completed = sum(b['status']=='confirmed' and b['dt']+timedelta(hours=1)<=now for b in month)
-    scheduled = [b for b in month if b['dt']>now]
-    provisional = sum(b['status']=='provisional' for b in scheduled)
-    lines = [f'📊 今月（{now.month}月）のご利用状況です😊', '',
-             f'✅ 利用済み：{completed}回', f'📅 これからの予約：{len(scheduled)}件（うち仮予約 {provisional}件）']
+    count_entries=counted_reservations(entries,rows)
+    month=[b for b in count_entries if (b['dt'].year,b['dt'].month)==(now.year,now.month)]
+    provisional=sum(b['status']=='provisional' for b in month)
+    scheduled=[b for b in month if b['dt']>now]
+    lines=[f'📊 今月（{now.month}月）のご予約です😊','',
+           f'📅 予約件数：{len(month)}件（うち仮予約 {provisional}件）',
+           f'🗓️ このうち、これからの予約：{len(scheduled)}件']
     context = json.loads(session.get('flow_data','{}')) if session else {}
     if context.get('paused_booking'):
         session = context['paused_booking']
@@ -66,7 +69,7 @@ async def monthly_usage_reply(service, token, uid, user, session):
         ident = context.get('target_booking_id') or context.get('last_request')
         selected = next((b for b in entries if b['id']==ident), None)
     if selected and (selected['dt'].year,selected['dt'].month)==(now.year,now.month):
-        timeline = [b for b in month if b['status']=='confirmed' or b['dt']>now]
+        timeline = list(month)
         if proposed and context.get('mode')=='change':
             timeline = [b for b in timeline if not (b['id']==context.get('target_booking_id') and b['type']==context.get('target_booking_type'))]
         earlier = {(b['dt'],b['store']) for b in timeline if b['dt']<selected['dt']}
@@ -74,7 +77,7 @@ async def monthly_usage_reply(service, token, uid, user, session):
                   f'この予約は、今ある予定どおりなら今月{len(earlier)+1}回目になります。']
     elif selected:
         lines += ['', '📅 選択中の予約は'+selected['dt'].strftime('%m月%d日')+'です（今月分には含みません）。']
-    lines += ['', '💡 仮予約は利用済みには含めず、予定の順番に含めています。']
+    lines += ['', '💡 今月の日付の予約を数えています。仮予約を含み、取消済みは除きます。変更前後はまとめて1件です。']
     if session and session.get('flow_type')=='booking':
         lines += ['', '😊 '+('変更' if context.get('mode')=='change' else '予約')+'の途中の内容はそのままです。前の時間ボタンや日時の入力で続けられます。']
     await service.reply_text(token, '\n'.join(lines))

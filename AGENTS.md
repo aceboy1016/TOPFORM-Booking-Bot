@@ -15,6 +15,8 @@
 - 応答後の裸のasyncio.create_taskで業務処理を続けない。同期Google呼び出しはasync_services.google_callをawaitする。
 - 変更前予約は承認まで保持する。Calendarの変更・取消反映はスタッフの作業。
 
+- 2026-09-15確認：個室Aは希望として扱い、Bだけ空く時間も明示して提案する。消化・残回数の台帳は管理せず、予約件数を表示する。
+
 ## 検証・運用
 
 `venv/bin/python -m pytest -q`を実行。既存の実API確認スクリプトと`tests/`のオフライン回帰テストを混同しないこと。本番と同じ保存処理はローカルFirestore emulatorでテストする（`TEST_FIRESTORE=1`、`FIRESTORE_EMULATOR_HOST=127.0.0.1:8681`）。課金される本番DBをテストに使わない。
