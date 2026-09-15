@@ -1088,11 +1088,9 @@ class LINEService:
                 else:
                     success_msg = (
                         f"✅ 仮予約を受け付けました！\n\n"
-                        f"↓↓↓↓↓\n\n"
-                        f"▼ 予約内容\n"
-                        f" ・{display_date}（{wd}） {hour:02d}:{minute:02d}-\n"
-                        f" ・{store_display}\n"
-                        f" ・受付No. {booking_id}\n\n"
+                        f"📅 {display_date}（{wd}）\n"
+                        f"🕐 {hour:02d}:{minute:02d}〜\n"
+                        f"📍 {store_display}\n\n"
                         f"※ まだ予約は確定ではありません。\n"
                         f"スタッフが確認後、確定のご連絡をいたします📩"
                     )
@@ -1610,7 +1608,7 @@ class LINEService:
         from booking_view import user_bookings
         existing={(b['dt'],b['store']):b for b in await user_bookings(self,user_id,user)}
         snapshot=await self._get_bookings(force=True)
-        results=[];seen=set();last=None
+        results=[];seen=set();last=None;accepted=0;duplicates=0;unavailable=0
 
         for entry in entries:
             try:
@@ -1621,7 +1619,8 @@ class LINEService:
                 if key in seen: continue
                 seen.add(key)
                 if key in existing:
-                    results.append(f"受付済み（追加なし）: {slot.strftime('%m/%d %H:%M')} {STORE_NAMES[entry['store']]}")
+                    duplicates += 1
+                    results.append(f"📋 受付済みです（追加していません）\n📅 {slot.strftime('%m/%d')}（{WEEKDAY_JP[slot.weekday()]}）\n🕐 {slot.strftime('%H:%M')}〜{end.strftime('%H:%M')}\n📍 {STORE_NAMES[entry['store']]}")
                     continue
                 result=check_availability(slot,entry['store'],snapshot)
                 if not result['is_available']: raise ValueError(REASONS.get(result.get('reason'),'空きがありません。'))
@@ -1629,14 +1628,27 @@ class LINEService:
                 if entry['store']!='ebisu' or room not in result.get('rooms_available',[]): room=None
                 bid=await db.save_booking(user_id,entry['store'],slot.isoformat(),'provisional',{'room':room,'customer_name':user.get('display_name','')})
                 last=bid
-                results.append(f"受付 No.{bid}: {slot.strftime('%m/%d %H:%M')} {STORE_NAMES[entry['store']]}")
+                accepted += 1
+                results.append(f"✅ 仮予約を受け付けました\n📅 {slot.strftime('%m/%d')}（{WEEKDAY_JP[slot.weekday()]}）\n🕐 {slot.strftime('%H:%M')}〜{end.strftime('%H:%M')}\n📍 {STORE_NAMES[entry['store']]}")
             except ValueError as exc:
-                results.append(f"受付不可 {entry['date_str']} {entry['time_str']}: {exc}")
+                unavailable += 1
+                results.append(f"🌱 こちらの日時は受け付けできませんでした\n📅 {entry['date_str']}  🕐 {entry['time_str']}\n📍 {STORE_NAMES[entry['store']]}\n{exc}")
         if last:
             from conversation import remember
             await remember(user_id,last,{})
         self._invalidate_cache()
-        await self.reply_text(reply_token,'仮予約の受付結果\n'+'\n'.join(results)+'\nスタッフ確認後に確定します。')
+        summary = f"📩 ご連絡ありがとうございます😊\n\nご希望の日時を確認しました！\n✅ 新しく受け付けた仮予約：{accepted}件"
+        if duplicates:
+            summary += f"\n📋 受付済み：{duplicates}件（追加なし）"
+        if unavailable:
+            summary += f"\n🌱 受付できなかった日時：{unavailable}件"
+        footer = ""
+        if accepted:
+            footer += "\n\n⏳ まだ予約は確定していません。\nスタッフが確認後、このLINEに確定のご案内をお送りします📩"
+        if unavailable:
+            footer += "\n\n💬 別のご希望があれば、日時を教えてくださいね😊"
+        footer += "\n\n📋 ご予約の確認は「予約確認」と送ってください😊"
+        await self.reply_text(reply_token, summary + '\n\n' + '\n\n'.join(results) + footer)
 
 
 # Singleton instance
