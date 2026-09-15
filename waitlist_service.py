@@ -1,6 +1,7 @@
 """Durable waitlist offers. Calendar remains read-only."""
 import json
-from datetime import datetime, timedelta
+import math
+from datetime import datetime
 from database import db
 from sheets_service import sheets_service
 from calendar_service import calendar_service, check_availability, get_available_slots
@@ -44,13 +45,13 @@ async def check_waitlist():
             if any(w in raw for w in ('または','どちら','両店舗')): stores=list(STORE_NAMES)
         for store in stores:
             if not check_availability(slot,store,snapshot)['is_available']: continue
-            payload={'date':entry['date'],'time':entry['time'],'store':store,'expires_at':(datetime.now(JST)+timedelta(minutes=30)).isoformat()}
+            payload={'date':entry['date'],'time':entry['time'],'store':store}
             if native: payload['source']='chat'
             buttons=[]
             for action,label in [('waitlist_accept','受けます'),('waitlist_decline','見送ります')]:
-                token=await db.make_action(entry['line_id'],{'a':action,'wid':entry['id']})
+                token=await db.make_action(entry['line_id'],{'a':action,'wid':entry['id']},ttl=max(1,math.ceil((slot-datetime.now(JST)).total_seconds()/60)))
                 buttons.append({'type':'button','action':{'type':'postback','label':label,'data':token}})
-            flex={'type':'bubble','body':{'type':'box','layout':'vertical','contents':[{'type':'text','text':'空き枠のお知らせ','weight':'bold'},{'type':'text','text':f"{entry['date']} {entry['time']} {STORE_NAMES[store]}",'wrap':True},{'type':'text','text':'30分以内にお返事ください。仮予約の受付で、枠の確保はスタッフ確認後です。','wrap':True,'size':'sm'}]},'footer':{'type':'box','layout':'horizontal','contents':buttons}}
+            flex={'type':'bubble','body':{'type':'box','layout':'vertical','contents':[{'type':'text','text':'空き枠のお知らせ','weight':'bold'},{'type':'text','text':f"{entry['date']} {entry['time']} {STORE_NAMES[store]}",'wrap':True},{'type':'text','text':'ご都合はいかがですか？回答時に最新の空きを確認します。スタッフ確認までは仮予約で、枠は確保していません。','wrap':True,'size':'sm'}]},'footer':{'type':'box','layout':'horizontal','contents':buttons}}
             if await db.save_waitlist_offer(entry['id'],entry['line_id'],payload,flex): count+=1
             break
     return {'offered':count}

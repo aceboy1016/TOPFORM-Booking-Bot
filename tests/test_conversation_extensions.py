@@ -210,3 +210,30 @@ async def test_preferred_store_survives_date_paging(service,database):
     await tap(service,next(a for a in buttons(service) if '次の日程' in a['label']))
     choices=[await database.get_action(json.loads(a['data'])['id'],'u') for a in times(service)]
     assert choices and all(a['store']=='ebisu' for a in choices)
+
+async def test_waitlist_offer_has_no_thirty_minute_response_timer(service,database,monkeypatch):
+    from datetime import datetime
+    from booking_rules import JST
+    day=future()
+    await database.request_waitlist('no-timer','u',{'dates':[day.strftime('%Y-%m-%d')],'store':'ebisu','time':'10:00','filters':{},'source':'chat'},'waiting')
+    monkeypatch.setattr(waitlist_service.sheets_service,'fetch_waitlist',lambda:[])
+    monkeypatch.setattr(waitlist_service.calendar_service,'fetch_all_bookings',lambda:ls.BookingData([],[],[]))
+    assert (await waitlist_service.check_waitlist())['offered']==1
+    row=await database.get_waitlist('no-timer','u')
+    assert 'expires_at' not in json.loads(row['payload'])
+    notice=next(n for n in await database.notification_backlog() if n['kind']=='flex:no-timer')
+    assert '30分' not in notice['body']
+    token=json.loads(json.loads(notice['body'])['footer']['contents'][0]['action']['data'])
+    from tests.storage_helpers import records
+    from database import actions
+    stored=next(a for a in await records(database,actions) if a['id']==token['id'])
+    assert datetime.fromisoformat(stored['expires_at'])>datetime.now(JST)+timedelta(days=1)
+    await service.handle_postback_event(event(data=token),user())
+    assert (await database.get_waitlist('no-timer','u'))['state']=='accepted'
+
+async def test_legacy_waitlist_payload_timer_is_not_enforced(service,database):
+    day=future()
+    await database.save_waitlist_offer('legacy-timer','u',{'date':day.strftime('%Y-%m-%d'),'time':'10:00','store':'ebisu','expires_at':'2020-01-01T00:00:00+09:00'}, {})
+    token=json.loads(await database.make_action('u',{'a':'waitlist_accept','wid':'legacy-timer'}))
+    await service.handle_postback_event(event(data=token),user())
+    assert (await database.get_waitlist('legacy-timer','u'))['state']=='accepted'

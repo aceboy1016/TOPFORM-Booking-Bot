@@ -117,8 +117,6 @@ async def handle_action(service,event,user):
         if not row or row['state']!='offered':
             await service.reply_text(token,'💡 この提案は回答済み、または受付を終了しています。');return
         payload=json.loads(row['payload'])
-        if datetime.fromisoformat(payload['expires_at'])<datetime.now(JST):
-            await service.reply_text(token,'⏳ この提案は受付時間を過ぎています。\n担当者へご相談くださいね。');return
         if action=='waitlist_accept':
             snapshot=await service._get_bookings(force=True)
             if not check_availability(parse_slot(payload['date'],payload['time']),payload['store'],snapshot)['is_available']:
