@@ -63,9 +63,8 @@ async def handle_action(service,event,user):
         from admin_review import handle
         await handle(service,token,uid,data)
         return
-    if action == 'waitlist_withdraw':
-        changed=await db.withdraw_waitlist(data['wid'],uid)
-        await service.reply_text(token,'👌 キャンセル待ちを取り下げました。予約はそのまま残っています。' if changed else '💡 このキャンセル待ちは受付を終了しています。')
+    if action in ('waitlist_withdraw','waitlist_accept','waitlist_decline'):
+        await service.reply_text(token,'🌿 キャンセル待ち・空き通知の受付は終了しました。\nご希望の日を送ると最新の空きを確認できます😊\n受付済みの予約はそのままです。')
         return
     if action == 'support_confirm':
         session=await db.get_session(uid)
@@ -112,23 +111,21 @@ async def handle_action(service,event,user):
             await db.set_session(uid, 'booking', 'select_time', json.dumps(context))
             await service._handle_booking_flow(token, uid, user, await db.get_session(uid), data['time'])
         return
-    if action in ('waitlist_accept','waitlist_decline'):
-        row=await db.get_waitlist(data['wid'],uid)
-        if not row or row['state']!='offered':
-            await service.reply_text(token,'💡 この提案は回答済み、または受付を終了しています。');return
-        payload=json.loads(row['payload'])
-        if action=='waitlist_accept':
-            snapshot=await service._get_bookings(force=True)
-            if not check_availability(parse_slot(payload['date'],payload['time']),payload['store'],snapshot)['is_available']:
-                await service.reply_text(token,'🌿 申し訳ありません。現在はこの枠をお取りできません。\n別の日時をご検討ください。');return
-        state='accepted' if action=='waitlist_accept' else 'declined'
-        notice=f"キャンセル待ち {'承諾' if state=='accepted' else '辞退'}\n{user['display_name']}\n{payload['date']} {payload['time']} {STORE_NAMES[payload['store']]}\nスタッフ確認をお願いします。"
-        changed=await db.respond_waitlist(data['wid'],uid,state,notice)
-        await service.reply_text(token,('📋 仮予約の希望を受け付けました！\n\nスタッフが確認後ご連絡します😊' if state=='accepted' else '👌 今回は見送りとして受け付けました。\nまたご都合のよい機会にご利用ください😊') if changed else '💡 回答済みです。ありがとうございます。')
-        return
     booking=await resolve_booking(service,uid,user,data.get('t'),data.get('bid'))
     if not booking or booking['dt']<=datetime.now(JST):
         await service.reply_text(token,'🔎 この予約は変更済み・取消済み、または開始時刻を過ぎています。\n\n「予約確認」から最新の予約一覧をご確認ください。');return
+    if action in ('deferred_keep','deferred_cancel'):
+        session=await db.get_session(uid)
+        context=json.loads(session.get('flow_data','{}')) if session else {}
+        if context.get('deferred_id')!=data.get('deferred_id'):
+            await service.reply_text(token,'💡 この確認は終了しています。変更したい予約をもう一度教えてください😊')
+            return
+        if action=='deferred_cancel':
+            await cancellation_confirmation(service,token,uid,booking,'新しい日程は未定のまま、こちらの予約の取消を申請します。日程が決まったら改めて予約できます。')
+        else:
+            from conversation import begin_change
+            await begin_change(service,token,uid,user,booking,later=True)
+        return
     if action=='cancel_request':
         await cancellation_confirmation(service,token,uid,booking);return
     if action=='cancel_confirm':

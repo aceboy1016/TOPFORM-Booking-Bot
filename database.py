@@ -189,6 +189,10 @@ class Database:
                 if res.rowcount: claimed.append(dict(r))
             return claimed
 
+    async def discard_notification(self, ident):
+        async with self.engine.begin() as conn:
+            await conn.execute(update(outbox).where(outbox.c.id==ident).values(state='discarded',lease_until=None,last_error=None))
+
     async def notification_result(self,ident,error=None,manual=False):
         async with self.engine.begin() as conn:
             values={'state':'sent','lease_until':None,'last_error':None} if error is None else {'last_error':type(error).__name__,'lease_until':(datetime.now(JST)+timedelta(minutes=2)).isoformat()}
@@ -204,7 +208,7 @@ class Database:
 
     async def notification_backlog(self):
         async with self.engine.connect() as conn:
-            return [dict(r) for r in (await conn.execute(select(outbox).where(outbox.c.state!='sent').order_by(outbox.c.created_at).limit(100))).mappings()]
+            return [dict(r) for r in (await conn.execute(select(outbox).where(outbox.c.state.in_(['pending','review'])).order_by(outbox.c.created_at).limit(100))).mappings()]
 
     async def make_action(self,user_id,payload,ttl=30):
         ident=str(uuid.uuid4())

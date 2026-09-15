@@ -108,43 +108,12 @@ async def test_staff_consultation_confirmation_and_resume(service,database):
     await service.handle_postback_event(event(data=action),user())
     assert len(await database.notification_backlog())==1
 
-async def test_native_waitlist_intake_offer_accept_without_sheet_projection(service,database,monkeypatch):
-    day=future()
-    await service.handle_text_message(event(f'{day.month}/{day.day} 半蔵門 10:00'),user())
-    before=await database.get_session('u')
-    await service.handle_text_message(event('空いたら教えて'),user())
-    assert await database.waiting_requests()==[]
-    await service.handle_postback_event(event(data=confirm_action(service)),user())
-    waiting=await database.waiting_requests()
-    assert len(waiting)==1 and context(await database.get_session('u'))==context(before)
-    monkeypatch.setattr(waitlist_service.sheets_service,'fetch_waitlist',lambda:[])
-    monkeypatch.setattr(waitlist_service.calendar_service,'fetch_all_bookings',lambda:ls.BookingData([],[],[]))
-    assert (await waitlist_service.check_waitlist())['offered']==1
-    assert (await waitlist_service.check_waitlist())['offered']==0
-    api=AsyncMock();await flush_notifications(api,limit=10)
-    assert await database.notification_backlog()==[]
-    offered=await database.get_waitlist(waiting[0]['id'],'u')
-    action=json.loads(await database.make_action('u',{'a':'waitlist_accept','wid':offered['id']}))
-    await service.handle_postback_event(event(data=action),user())
-    assert (await database.get_waitlist(offered['id'],'u'))['state']=='accepted'
-    assert all(row['kind']!='sheet' for row in await database.notification_backlog())
 
 async def test_support_back_does_not_notify(service,database):
     await service.handle_text_message(event('スタッフに相談したい'),user())
     await service.handle_text_message(event('やめる'),user())
     assert await database.notification_backlog()==[]
 
-async def test_withdraw_waitlist_suppresses_queued_offer(service,database):
-    day=future()
-    await database.request_waitlist('native','u',{'dates':[day.strftime('%Y-%m-%d')],'store':'ebisu','time':None,'filters':{},'source':'chat'},'waiting')
-    await database.save_waitlist_offer('native','u',{'date':day.strftime('%Y-%m-%d'),'source':'chat'},{'type':'bubble','body':{'type':'box','layout':'vertical','contents':[{'type':'text','text':'offer'}]}})
-    await service.handle_text_message(event('キャンセル待ちを取り消して'),user())
-    card=service.reply_flex.call_args.args[2]['contents'][0]
-    await service.handle_postback_event(event(data=json.loads(card['footer']['contents'][0]['action']['data'])),user())
-    assert (await database.get_waitlist('native','u'))['state']=='cancelled'
-    api=AsyncMock();await flush_notifications(api,limit=10)
-    assert all(call.args[0].to!='u' for call in api.push_message.call_args_list)
-    assert await database.get_user_bookings('u',True)==[]
 
 async def test_expired_waitlist_and_foreign_withdraw_are_safe(database):
     await database.request_waitlist('old','u',{'dates':['2020-01-01'],'source':'chat'},'old')
@@ -178,20 +147,6 @@ async def test_unavailable_primary_suggests_next_day(service,database,monkeypatc
     choices=[await database.get_action(json.loads(a['data'])['id'],'u') for a in times(service)]
     assert choices and all(a['date']==later.strftime('%Y-%m-%d') and a['store']=='ebisu' for a in choices)
 
-async def test_waitlist_time_correction_retains_date_and_store(service,database):
-    day=future()
-    await service.handle_text_message(event(f'{day.month}/{day.day} 半蔵門 10:15 キャンセル待ち'),user())
-    session=await database.get_session('u')
-    assert session['flow_state']=='collect'
-    assert context(session)['dates']==[day.strftime('%Y-%m-%d')]
-    assert await database.waiting_requests()==[]
-    await service.handle_text_message(event('10:30'),user())
-    assert (await database.get_session('u'))['flow_state']=='confirm'
-    await service.handle_postback_event(event(data=confirm_action(service)),user())
-    rows=await database.waiting_requests()
-    assert len(rows)==1
-    payload=json.loads(rows[0]['payload'])
-    assert payload['time']=='10:30' and payload['store']=='hanzoomon'
 
 async def test_edited_support_rejects_old_confirmation(service,database):
     await service.handle_text_message(event('スタッフに相談したい'),user())
@@ -210,30 +165,3 @@ async def test_preferred_store_survives_date_paging(service,database):
     await tap(service,next(a for a in buttons(service) if '次の日程' in a['label']))
     choices=[await database.get_action(json.loads(a['data'])['id'],'u') for a in times(service)]
     assert choices and all(a['store']=='ebisu' for a in choices)
-
-async def test_waitlist_offer_has_no_thirty_minute_response_timer(service,database,monkeypatch):
-    from datetime import datetime
-    from booking_rules import JST
-    day=future()
-    await database.request_waitlist('no-timer','u',{'dates':[day.strftime('%Y-%m-%d')],'store':'ebisu','time':'10:00','filters':{},'source':'chat'},'waiting')
-    monkeypatch.setattr(waitlist_service.sheets_service,'fetch_waitlist',lambda:[])
-    monkeypatch.setattr(waitlist_service.calendar_service,'fetch_all_bookings',lambda:ls.BookingData([],[],[]))
-    assert (await waitlist_service.check_waitlist())['offered']==1
-    row=await database.get_waitlist('no-timer','u')
-    assert 'expires_at' not in json.loads(row['payload'])
-    notice=next(n for n in await database.notification_backlog() if n['kind']=='flex:no-timer')
-    assert '30分' not in notice['body']
-    token=json.loads(json.loads(notice['body'])['footer']['contents'][0]['action']['data'])
-    from tests.storage_helpers import records
-    from database import actions
-    stored=next(a for a in await records(database,actions) if a['id']==token['id'])
-    assert datetime.fromisoformat(stored['expires_at'])>datetime.now(JST)+timedelta(days=1)
-    await service.handle_postback_event(event(data=token),user())
-    assert (await database.get_waitlist('no-timer','u'))['state']=='accepted'
-
-async def test_legacy_waitlist_payload_timer_is_not_enforced(service,database):
-    day=future()
-    await database.save_waitlist_offer('legacy-timer','u',{'date':day.strftime('%Y-%m-%d'),'time':'10:00','store':'ebisu','expires_at':'2020-01-01T00:00:00+09:00'}, {})
-    token=json.loads(await database.make_action('u',{'a':'waitlist_accept','wid':'legacy-timer'}))
-    await service.handle_postback_event(event(data=token),user())
-    assert (await database.get_waitlist('legacy-timer','u'))['state']=='accepted'

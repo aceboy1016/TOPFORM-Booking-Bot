@@ -21,7 +21,7 @@ def filters_from(text, previous=None, reference=None):
         if 0<=value<=24*60:
             result['after' if direction in ('以降','から') else 'through'] = value
     if reference is not None:
-        if re.search(r'遅め|遅く',text): result['after'] = reference+30
+        if re.search(r'遅め|遅く|もう少し遅|もうちょいあと|もう少しあと|もう少し後|もっと後',text): result['after'] = reference+30
         if re.search(r'早め|早く',text): result['before'] = reference
     return result
 

@@ -279,6 +279,15 @@ class FirestoreDatabase:
                 break
         return claimed
 
+    async def discard_notification(self, ident):
+        async def operation(unit):
+            ref = self.ref('notification_outbox', ident)
+            row = await unit.get(ref)
+            if row:
+                row.update(state='discarded', lease_until=None, last_error=None)
+                unit.put(ref, row)
+        await self._run(operation)
+
     async def notification_result(self, ident, error=None, manual=False):
         async def operation(unit):
             ref = self.ref('notification_outbox', ident)
