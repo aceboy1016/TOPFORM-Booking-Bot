@@ -8,19 +8,8 @@ from database import db
 async def flush_notifications(api,limit=5):
     if api is None: return
     for row in await db.pending_notifications(limit=limit):
-        if row['kind']=='sheet':
-            from sheets_service import sheets_service
-            from async_services import google_call
-            try:
-                payload=json.loads(row['body'])
-                state=await db.waitlist_state(payload['id'])
-                if payload['status']!='通知済み' or state=='offered':
-                    await google_call(sheets_service.update_waitlist_status,payload['id'],payload['status'])
-                await db.notification_result(row['id'])
-            except Exception as exc: await db.notification_result(row['id'],exc)
-            continue
-        if row['kind'].startswith('flex:') and await db.waitlist_state(row['kind'].split(':',1)[1])!='offered':
-            await db.notification_result(row['id'])
+        if row['kind']=='sheet' or row['kind'].startswith('flex:') or row['body'].startswith(('🔔 キャンセル待ち','キャンセル待ち 承諾','キャンセル待ち 辞退')):
+            await db.discard_notification(row['id'])
             continue
         # LINE retry keys have a finite deduplication window. Do not automatically
         # resend an uncertain delivery after it has expired.
@@ -32,8 +21,6 @@ async def flush_notifications(api,limit=5):
                 contents=json.loads(row['body'])
                 title=contents.get('header',{}).get('contents',[{}])[0].get('text','予約のお知らせ')
                 messages=[FlexMessage(alt_text=title,contents=FlexContainer.from_dict(contents))]
-            elif row['kind'].startswith('flex:'):
-                messages=[FlexMessage(alt_text='空き枠のお知らせ',contents=FlexContainer.from_dict(json.loads(row['body'])))]
             else:
                 messages=[TextMessage(text=row['body'][i:i+4500]) for i in range(0,len(row['body']),4500)]
             if len(messages)>5: raise ValueError('Notification too large')

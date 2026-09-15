@@ -129,8 +129,7 @@ async def get_user_bookings(line_user_id:str):
 @app.post('/api/check-waitlist',dependencies=[Depends(require_admin)])
 async def trigger_check_waitlist():
     from waitlist_service import check_waitlist
-    try: return await check_waitlist()
-    finally: await flush_notifications(line_service._api)
+    return await check_waitlist()
 
 @app.post('/api/notifications/retry',dependencies=[Depends(require_admin)])
 async def retry_notifications():
@@ -145,7 +144,7 @@ async def notification_backlog():
 async def pending_requests(): return {'requests':await db.pending_bookings()}
 
 @app.get('/api/waitlist',dependencies=[Depends(require_admin)])
-async def waitlist_overview(): return {'requests':await db.waitlist_overview()}
+async def waitlist_overview(): return {'status':'disabled','requests':[]}
 
 class ReviewRequest(BaseModel):
     status:Literal['confirmed','rejected']

@@ -416,6 +416,15 @@ class LINEService:
         Extract a specific HH:MM time from natural language text.
         Supports: 19:00 / 19：00 / 19時 / 19時30分
         """
+        import unicodedata
+        text = unicodedata.normalize('NFKC', text)
+        # Compact chat times, excluding years and substrings of dates/numbers.
+        compact = re.search(r'(?<![\d/年-])(\d{3,4})(?![\d/年月日-])',text)
+        if compact:
+            value=compact[1];hour,minute=int(value[:-2]),int(value[-2:])
+            if 0<=hour<=23 and 0<=minute<=59: return hour,minute
+        span=re.search(r'(?<![\d/])(\d{1,2})[-〜~](\d{1,2})時',text)
+        if span and 0<=int(span[1])<=23: return int(span[1]),0
         m = re.search(r"(\d{1,2})[:：](\d{2})", text)
         if m:
             hour, minute = int(m.group(1)), int(m.group(2))
@@ -482,6 +491,7 @@ class LINEService:
         dates = data['picker_dates']
         cards = []
         displayed=[]
+        displayed_slots=[]
         rows=[(date,store,note) for date in dates[date_offset:date_offset+(1 if only_store else 4)] for store in stores]
         def slots_for(date,store):
             return matching(get_available_slots(datetime.strptime(date,'%Y-%m-%d'),store,snapshot),data.get('filters',filters_from(data.get('picker_filter',''))))
@@ -519,6 +529,7 @@ class LINEService:
                     {'type': 'text', 'text': row_note or ('空き時間をタップしてください👇'+('（'+filter_label(data.get('filters',{}))+'）' if data.get('filters') else '') if slots else '🌿 この日の空きはありません。別の日も聞いてくださいね。'), 'wrap': True, 'size': 'sm', 'margin': 'md'}]
             for slot in slots[slot_offset:slot_offset+10]:
                 displayed.append(slot.strftime('%H:%M'))
+                displayed_slots.append({'date':date,'store':store,'time':slot.strftime('%H:%M')})
                 body.append(await button('🕐 '+slot.strftime('%H:%M'), {'a':'pick_slot', 'date':date, 'store':store, 'time':slot.strftime('%H:%M')}))
             if len(slots) > slot_offset+10:
                 body.append(await button('次の時間を見る ➡️', {'a':'picker_page', 'date_offset':0, 'date':date, 'slot_offset':slot_offset+10, 'store':store}))
@@ -532,6 +543,7 @@ class LINEService:
             current_data=json.loads(current['flow_data'])
             if current_data.get('picker_id')==data.get('picker_id'):
                 current_data['last_shown']=displayed
+                current_data['shown_slots']=displayed_slots
                 await db.set_session(uid,'booking',current['flow_state'],json.dumps(current_data))
         await self.reply_messages(token, [FlexMessage(alt_text='📅 空き時間を選んで仮予約へ😊', contents=FlexContainer.from_dict({'type':'carousel','contents':cards}))])
 
@@ -973,7 +985,8 @@ class LINEService:
                 )
 
         elif state == "confirm":
-            if text.strip().upper() in ("確定", "確定する", "はい", "OK", "予約する", "お願いします", "はい、お願いします", "はいお願いします"):
+            consent = re.sub(r'[\s!！。😊🙌🙏👍✅☺️]+$', '', text.strip()).upper()
+            if consent in ("確定", "確定する", "はい", "OK", "予約する", "お願いします", "はい、お願いします", "はいお願いします"):
                 mode = data.get("mode", "booking")
                 target_id = data.get("target_booking_id")
                 target_type = data.get("target_booking_type")

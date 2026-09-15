@@ -25,11 +25,12 @@ async def test_old_uncertain_delivery_requires_manual_review(database):
     assert api.push_message.await_count==0
     assert (await database.notification_backlog())[0]['state']=='review'
 
-async def test_flex_and_sheet_projection_are_durable(database):
+async def test_retired_waitlist_offer_is_discarded_without_projection(database):
     await database.save_waitlist_offer('id','user',{}, {'type':'bubble','body':{'type':'box','layout':'vertical','contents':[{'type':'text','text':'test'}]}})
     api=AsyncMock();await flush_notifications(api)
     rows=await database.notification_backlog()
-    assert len(rows)==1 and rows[0]['kind']=='sheet'
+    assert rows==[]
+    api.push_message.assert_not_awaited()
 
 async def test_stale_offer_projection_does_not_overwrite_response(database,monkeypatch):
     import notifications
@@ -42,4 +43,4 @@ async def test_stale_offer_projection_does_not_overwrite_response(database,monke
     await patch_rows(database,outbox,{'state':'sent'},'kind','sheet',negate=True)
     await flush_notifications(AsyncMock())
     assert ('id','通知済み') not in calls
-    assert ('id','承諾') in calls
+    assert calls==[]

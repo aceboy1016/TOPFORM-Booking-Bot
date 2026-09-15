@@ -83,14 +83,6 @@ async def test_old_raw_button_is_rejected(service,database):
     await service.handle_postback_event(event(data={'a':'cancel_request','bid':1}),user())
     assert '期限切れ' in service.reply_text.call_args.args[1]
 
-async def test_waitlist_reply_records_once(service,database):
-    day=future()
-    await database.save_waitlist_offer('wid','u',{'date':day.strftime('%Y-%m-%d'),'time':'10:00','store':'ebisu','expires_at':(datetime.now(JST)+timedelta(minutes=30)).isoformat()},{})
-    action=json.loads(await database.make_action('u',{'a':'waitlist_accept','wid':'wid'}))
-    await service.handle_postback_event(event(data=action),user())
-    assert (await database.get_waitlist('wid','u'))['state']=='accepted'
-    await service.handle_postback_event(event(data=action),user())
-    assert '回答済み' in service.reply_text.call_args.args[1]
 
 async def test_booking_view_deduplicates(service,database,monkeypatch):
     from booking_view import user_bookings

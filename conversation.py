@@ -23,7 +23,8 @@ def normalize(text):
 
 def mentioned_dates(text):
     """Partial dates identify existing bookings; never roll them into next year."""
-    pattern = r'(?:(\d{4})[/年-])?(\d{1,2})[/月-](\d{1,2})日?|(?<!\d)(\d{1,2})日'
+    pattern = r'(?:(\d{4})[/年-])?(\d{1,2})[/月](\d{1,2})日?|(?<!\d)(\d{1,2})日'
+    text=re.sub(r'(\d{4})-(\d{2})-(\d{2})',r'\1/\2/\3',text)
     return [(int(m[1]) if m[1] else None, int(m[2]) if m[2] else None,
              int(m[3] or m[4])) for m in re.finditer(pattern, text)]
 
@@ -45,7 +46,13 @@ async def remember(uid, ident, data):
         'last_request': str(ident), 'change_from': data.get('change_from')}))
 
 
-async def begin_change(service, token, uid, user, booking, desired=None):
+async def begin_change(service, token, uid, user, booking, desired=None, later=False):
+    if desired=='__deferred__':
+        from schedule_conversation import deferred_options
+        await deferred_options(service,token,uid,booking)
+        return
+    if desired and not service._parse_multiple_dates(desired) and service._extract_time(desired):
+        desired=booking['dt'].strftime('%Y-%m-%d')+' '+desired
     if cancel_band(booking['dt']) != 'normal':
         await service.reply_text(token, '⏰ 開始12時間以内の予約変更は、担当者へご相談ください。\n\n📅 元の予約は残っています。')
         return
@@ -57,6 +64,9 @@ async def begin_change(service, token, uid, user, booking, desired=None):
         for word, store in [('恵比寿','ebisu'),('半蔵門','hanzoomon')]:
             if word in desired: data['store']=store
     await db.set_session(uid, 'booking', 'select_date', json.dumps(data))
+    if later:
+        await service.reply_text(token,'👌 元の予約はそのまま残しています。\n\n'+label(booking)+'\n\n📅 新しい日程が決まったら教えてください😊\n元の予約に来られない場合は、取消を申請してください。')
+        return
     if desired and service._parse_multiple_dates(desired):
         await service._process_select_date(token,uid,{},desired,data)
         return
@@ -107,6 +117,8 @@ async def route(service, event, user, session):
         from booking_view import monthly_usage_reply
         await monthly_usage_reply(service, token, uid, user, session)
         return True
+    from schedule_conversation import route as schedule_route
+    if await schedule_route(service,event,user,session): return True
     from conversation_extras import route as extras_route
     if await extras_route(service,event,user,session): return True
     viewing=bool(re.fullmatch(r'(?:今の|今ある|自分の|私の)?(?:予約確認|予約一覧|マイ予約|予約(?:を|の)?(?:確認(?:したい|する|して|お願いします)?|見せて(?:ください)?|見たい|教えて(?:ください)?|いつ(?:だっけ)?))',compact))
@@ -233,12 +245,21 @@ async def route(service, event, user, session):
                 await db.set_session(uid,'booking','select_store',json.dumps(data))
                 await service.reply_text(token,'📅 希望日時を受け取りました！\n\n📍 店舗は恵比寿店・半蔵門店のどちらにしますか？両店舗でも大丈夫です😊')
             elif dates or data.get('date') or data.get('pending_datetime_text'):
-                requested=text if dates else data.pop('pending_datetime_text',None) or data['date']
+                requested=text if dates else data.pop('pending_datetime_text',None) or data['date']+' '+text
                 await service._process_select_date(token,uid,session,requested,data)
             else:
                 await db.set_session(uid,'booking','select_date',json.dumps(data))
                 await service.reply_text(token,'📍 '+('両店舗' if data['store']=='both' else STORE_NAMES[data['store']])+'ですね！\n\n📅 ご希望はいつですか？普段の言い方で教えてください😊')
             return True
+        time=service._extract_time(text)
+        if time and data.get('store')=='both':
+            matches=[slot for slot in data.get('shown_slots',[]) if slot['time']=='%02d:%02d'%time]
+            choices={(slot['date'],slot['store']) for slot in matches}
+            if len(choices)==1:
+                data['date'],data['store']=next(iter(choices))
+                await db.set_session(uid,'booking','select_time',json.dumps(data))
+                await service._handle_booking_flow(token,uid,user,await db.get_session(uid),text)
+                return True
         if service._extract_time(text) and data.get('date') and data.get('store') in STORE_NAMES:
             await service._handle_booking_flow(token,uid,user,dict(session,flow_state='select_time'),text)
             return True
@@ -254,7 +275,7 @@ async def route(service, event, user, session):
     if text == '予約 店舗変更' or '店舗変更' in text:
         return False
     if not intent and session and session.get('flow_state') == 'select_target':
-        if mentioned_dates(text):
+        if mentioned_dates(text) or service._parse_multiple_dates(text):
             intent = data.get('intent')
 
     if intent:
@@ -277,6 +298,9 @@ async def route(service, event, user, session):
             bookings = [b for b in bookings if not matches_date(b, protected)]
         if dates:
             bookings = [b for b in bookings if matches_date(b, dates)]
+        elif intent=='cancel' and positive and service._parse_multiple_dates(' '.join(positive)):
+            requested_days={d.date() for d in service._parse_multiple_dates(' '.join(positive))}
+            bookings=[b for b in bookings if b['dt'].date() in requested_days]
         elif intent == 'change' and data.get('last_request') and not quoted:
             bookings = [b for b in bookings if b['type']=='db' and b['id']==data['last_request']]
         elif intent == 'cancel' and changing and not quoted:
@@ -284,7 +308,7 @@ async def route(service, event, user, session):
         time = service._extract_time(text)
         if dates and time:
             bookings = [b for b in bookings if (b['dt'].hour, b['dt'].minute)==time]
-        if len(bookings)==1 and (dates or (intent=='change' and data.get('last_request'))):
+        if len(bookings)==1 and (dates or (intent=='cancel' and service._parse_multiple_dates(' '.join(positive))) or (intent=='change' and data.get('last_request'))):
             if intent == 'cancel':
                 await cancellation_confirmation(service, token, uid, bookings[0],
                     '残すと指定した予約は取り消しません。' if protected else '')
