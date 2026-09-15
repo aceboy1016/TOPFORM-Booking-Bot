@@ -103,3 +103,31 @@ async def test_cancelled_calendar_does_not_reappear_as_db_request(service,databa
     await database.release('calendar-cancel:u:cal',owner,done=True)
     assert await user_bookings(service,'u',user())==[]
     assert await resolve_booking(service,'u',user(),'cal','cal') is None
+
+async def test_bulk_receipt_readable_and_partial_results(service,database):
+    day=future().strftime('%Y/%m/%d')
+    entries=service._parse_hayamihyo_bulk(f'{day} 10:00-11:00 恵比寿\n{day} 12:00-14:00 恵比寿')
+    await service._handle_bulk_booking('t','u',user(),entries)
+    rows=await database.get_user_bookings('u',True)
+    text=service.reply_text.call_args.args[1]
+    assert len(rows)==1
+    assert '✅ 新しく受け付けた仮予約：1件' in text
+    assert '🌱 受付できなかった日時：1件' in text
+    assert '🕐 10:00〜11:00\n📍 恵比寿店' in text
+    assert '受付 No.' not in text and '受付No.' not in text
+    assert 'まだ予約は確定していません' in text
+    service.reply_text.reset_mock()
+    await service._handle_bulk_booking('t','u',user(),entries[:1])
+    text=service.reply_text.call_args.args[1]
+    assert '📋 受付済み：1件（追加なし）' in text
+    assert '✅ 新しく受け付けた仮予約：0件' in text
+    assert 'スタッフが確認後' not in text
+    assert len(await database.get_user_bookings('u',True))==1
+
+async def test_bulk_receipt_twenty_entries_within_line_limit(service,database):
+    day=future()
+    entries=service._parse_hayamihyo_bulk('\n'.join(f'{(day+timedelta(days=i)).strftime("%Y/%m/%d")} 10:00-11:00 恵比寿' for i in range(20)))
+    await service._handle_bulk_booking('t','u',user(),entries)
+    text=service.reply_text.call_args.args[1]
+    assert '✅ 新しく受け付けた仮予約：20件' in text
+    assert len(text)<5000
