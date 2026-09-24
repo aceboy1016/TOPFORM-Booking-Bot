@@ -131,3 +131,23 @@ async def test_bulk_receipt_twenty_entries_within_line_limit(service,database):
     text=service.reply_text.call_args.args[1]
     assert '✅ 新しく受け付けた仮予約：20件' in text
     assert len(text)<5000
+
+@pytest.mark.parametrize('reason',['travel_conflict','trainer_busy','store_full','room_unknown'])
+async def test_bulk_failure_never_exposes_internal_reason(reason,service,database,monkeypatch):
+    monkeypatch.setattr(ls,'check_availability',lambda *args:{'is_available':False,'reason':reason})
+    entries=service._parse_hayamihyo_bulk(f'{future().strftime("%Y/%m/%d")} 10:00-11:00 恵比寿')
+    await service._handle_bulk_booking('t','u',user(),entries)
+    text=service.reply_text.call_args.args[1]
+    assert '現在ご案内できません' in text
+    assert not any(term in text for term in ('店舗間','移動','満席','担当者の予定','個室の割当'))
+    assert await database.get_user_bookings('u',True)==[]
+
+async def test_bulk_accepts_own_room_hold(service,database):
+    slot=future();service._get_bookings.return_value=BookingData([
+        Booking('hold',slot,slot+timedelta(hours=1),'ebisu','TOPFORM 石原 淳哉 - HALLEL-個室A',room='A',source='ebisu'),
+        Booking('other',slot,slot+timedelta(hours=1),'ebisu','他の利用',room='B',source='ebisu'),
+    ],[],[])
+    entries=service._parse_hayamihyo_bulk(f'{slot.strftime("%Y/%m/%d")} 10:00-11:00 恵比寿')
+    await service._handle_bulk_booking('t','u',dict(user(),room_pref='A'),entries)
+    assert len(await database.get_user_bookings('u',True))==1
+    assert '新しく受け付けた仮予約：1件' in service.reply_text.call_args.args[1]

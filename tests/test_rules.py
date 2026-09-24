@@ -56,9 +56,9 @@ def test_hold_does_not_block_unrelated_hour():
     d=data();d.ishihara=[b('hold','2026-09-15T08:00','2026-09-15T23:00',title='TOPFORM 石原 淳哉'),b('real','2026-09-15T15:00','2026-09-15T16:00')]
     assert cs.check_availability(dt('2026-09-15T10:00'),'ebisu',d)['is_available']
 
-def test_travel_unknown_is_conservative():
+def test_unknown_location_does_not_imply_cross_store_travel():
     d=data();d.ishihara=[b('real','2026-09-15T09:00','2026-09-15T10:00',store='unknown')]
-    assert cs.check_availability(dt('2026-09-15T10:00'),'ebisu',d)['reason']=='travel_conflict'
+    assert cs.check_availability(dt('2026-09-15T10:00'),'ebisu',d)['is_available']
 
 def test_all_day_correct_timezone():
     event={'id':'x','summary':'予約不可','start':{'date':'2026-09-15'},'end':{'date':'2026-09-17'}}
@@ -92,3 +92,37 @@ def test_partial_calendar_failure_propagates(monkeypatch):
     monkeypatch.setattr(service,'_fetch_events',fetch)
     with pytest.raises(cs.CalendarUnavailable): service.fetch_all_bookings()
     assert service._consecutive_errors==1
+
+@pytest.mark.parametrize('room',['A','B'])
+def test_own_room_hold_is_available_with_other_room_occupied(room):
+    d=data();other='B' if room=='A' else 'A'
+    d.ebisu=[b('hold','2026-10-24T13:00','2026-10-24T14:00',room=room,title=f'TOPFORM 石原 淳哉 - HALLEL-個室{room}'),b('other','2026-10-24T13:00','2026-10-24T14:00',room=other)]
+    assert cs.check_availability(dt('2026-10-24T13:00'),'ebisu',d)['rooms_available']==[room]
+    d.ishihara=[b('customer','2026-10-24T13:00','2026-10-24T14:00',title='お客様（恵）')]
+    assert cs.check_availability(dt('2026-10-24T13:00'),'ebisu',d)['reason']=='trainer_busy'
+
+@pytest.mark.parametrize('kind',['customer_id','closure','private'])
+def test_hold_name_does_not_override_customer_or_closure(kind):
+    d=data();hold=b('hold','2026-10-24T13:00','2026-10-24T14:00',title='TOPFORM 石原 淳哉 - HALLEL-個室A')
+    if kind=='customer_id':hold.customer_id='real-customer'
+    if kind=='closure':hold.title+=' 予約不可'
+    if kind=='private':hold.source='private'
+    d.ishihara=[hold]
+    assert not cs.check_availability(dt('2026-10-24T13:00'),'ebisu',d)['is_available']
+
+def test_cross_store_travel_still_blocks_but_unknown_note_does_not():
+    d=data();note=b('note','2026-10-10T14:00','2026-10-10T15:00',store='unknown',title='プロテイン')
+    d.ishihara=[note]
+    assert cs.check_availability(dt('2026-10-10T13:00'),'ebisu',d)['is_available']
+    assert cs.check_availability(dt('2026-10-10T14:00'),'ebisu',d)['reason']=='trainer_busy'
+    note.store='hanzoomon'
+    assert cs.check_availability(dt('2026-10-10T13:00'),'ebisu',d)['reason']=='travel_conflict'
+
+def test_hanzomon_own_hold_not_counted_as_customer():
+    d=data();d.hanzoomon=[b(str(i),'2026-10-24T13:00','2026-10-24T14:00',store='hanzoomon') for i in range(2)]
+    d.hanzoomon.append(b('hold','2026-10-24T13:00','2026-10-24T14:00',store='hanzoomon',title='TOPFORM 石原 淳哉'))
+    assert cs.check_availability(dt('2026-10-24T13:00'),'hanzoomon',d)['is_available']
+
+def test_real_booking_in_same_room_not_hidden_by_hold():
+    d=data();d.ebisu=[b('hold','2026-10-24T13:00','2026-10-24T14:00',title='TOPFORM 石原 淳哉 - HALLEL-個室A'),b('real','2026-10-24T13:00','2026-10-24T14:00')]
+    assert cs.check_availability(dt('2026-10-24T13:00'),'ebisu',d)['rooms_available']==['B']

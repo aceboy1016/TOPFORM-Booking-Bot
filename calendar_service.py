@@ -316,6 +316,8 @@ def _get_detailed_store_status(slot_time, store, all_bookings):
     overlapping = [b for b in entries if max(slot_time,b.start_dt)<min(slot_end,b.end_dt)]
     if any(any(k in b.title for k in BLOCKING_KEYWORDS + [UNAVAILABLE_KEYWORD]) for b in overlapping):
         return {"is_full": True, "rooms_available": []}
+    # Our room reservations secure capacity for our customers; they are not customers.
+    overlapping = [b for b in overlapping if not is_resource_hold(b)]
     if store == "ebisu":
         # Unknown room: do not promise a specific room until it is assigned.
         if any(b.room not in STORE_CAPACITY['ebisu']['rooms'] for b in overlapping):
@@ -341,6 +343,12 @@ def is_topform_ishihara_booking(title: str) -> bool:
             return True
     return False
 
+def is_resource_hold(booking: Booking) -> bool:
+    """A named resource hold never overrides a customer or explicit closure."""
+    return (booking.source != 'private' and not booking.customer_id
+            and not any(k in booking.title for k in BLOCKING_KEYWORDS + [UNAVAILABLE_KEYWORD])
+            and is_topform_ishihara_booking(booking.title))
+
 def is_trainer_busy(
     slot_time: datetime,
     ishihara_bookings: list[Booking],
@@ -352,7 +360,7 @@ def is_trainer_busy(
     for b in ishihara_bookings:
         # Overlap check
         if max(slot_time, b.start_dt) < min(slot_end, b.end_dt):
-            if is_topform_ishihara_booking(b.title):
+            if is_resource_hold(b):
                 continue
             return True
     return False
@@ -370,10 +378,8 @@ def has_travel_conflict(
     for b in ishihara_bookings:
         # If no store info, ignore for travel conflict
         if not b.store or b.store == "unknown":
-            if is_topform_ishihara_booking(b.title):
-                continue
-            if max(travel_window_start,b.start_dt)<min(travel_window_end,b.end_dt):
-                return True
+            # No destination means there is no evidence of a cross-store trip.
+            # Actual overlap is still rejected by is_trainer_busy.
             continue
             
         # Same store -> no travel needed
@@ -383,7 +389,7 @@ def has_travel_conflict(
         # Overlap with travel window
         if max(travel_window_start, b.start_dt) < min(travel_window_end, b.end_dt):
             # Check if this is a TOPFORM hold to ignore
-            if is_topform_ishihara_booking(b.title):
+            if is_resource_hold(b):
                 continue
             return True
     return False

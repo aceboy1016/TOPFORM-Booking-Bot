@@ -10,7 +10,7 @@ import line_service as ls
 async def test_arrow_change_keeps_source_and_destination_separate(service,database):
     bid,old=await reserve(database,hour=16)
     new=old+timedelta(days=1)
-    await service.handle_text_message(event(f'こんばんは、日程変更のご相談です。\n{old.month}/{old.day}16:00〜@恵比寿\n↓\n{new.month}/{new.day}15:30〜@半蔵門\nに変更お願いできますでしょうか'),user())
+    await service.handle_text_message(event(f'こんばんは、日程変更のご相談です。\n{old.month}/{old.day} 16:00〜@恵比寿\n↓\n{new.month}/{new.day} 15:30〜@半蔵門\nに変更お願いできますでしょうか'),user())
     s,d=await state(database)
     assert d['target_booking_id']==bid and d['store']=='hanzoomon'
     assert d['date']==new.strftime('%Y-%m-%d') and d['time']=='15:30'
