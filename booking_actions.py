@@ -80,7 +80,25 @@ async def handle_action(service,event,user):
         if action == 'picker_confirm':
             valid = session and session.get('flow_type') == 'booking' and session.get('flow_state') == 'confirm' and context.get('confirmation_id') == data.get('confirmation_id')
             if not valid:
-                await service.reply_text(token, '🌿 この申込み確認は終了しています。時間を選び直すと、新しい確認を表示できます😊')
+                selection=data.get('selection')
+                if session and session.get('flow_type')=='booking' and selection:
+                    # Restore the clicked option, never silently submit a stale approval.
+                    same_target=(context.get('mode')==selection.get('mode') and context.get('target_booking_id')==selection.get('target_booking_id') and context.get('target_booking_type')==selection.get('target_booking_type'))
+                    if same_target:
+                        for key in ('time','room','confirmation_id','pending_datetime_text'):
+                            context.pop(key,None)
+                        context.update(date=selection['date'],store=selection['store'])
+                        if selection.get('room'):context['room_choice']=selection['room']
+                        snapshot=await service._get_bookings(force=True)
+                        if not check_availability(parse_slot(selection['date'],selection['time']),selection['store'],snapshot)['is_available']:
+                            await service._process_select_date(token,uid,session,selection['date'],context)
+                            return
+                        await service._handle_booking_flow(token,uid,user,{'flow_state':'select_time','flow_data':json.dumps(context)},selection['time'])
+                        return
+                if session and session.get('flow_type')=='booking' and context.get('date'):
+                    await service._process_select_date(token,uid,session,context['date'],context)
+                    return
+                await service.reply_text(token,'📋 このお申込みは終了しています。\n「予約確認」で受付状況を確認できます😊')
                 return
             await service._handle_booking_flow(token, uid, user, session, '確定する')
         elif action == 'picker_page':

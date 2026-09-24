@@ -8,7 +8,7 @@ import booking_actions
 
 
 def buttons(service):
-    payload = service.reply_messages.call_args.args[1][0].contents.to_dict()
+    payload = [m.to_dict() for m in service.reply_messages.call_args.args[1]]
     result = []
     def walk(value):
         if isinstance(value, dict):
