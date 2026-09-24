@@ -36,4 +36,4 @@ def parse_slot(day: str, time: str) -> datetime:
         raise ValueError('日時は YYYY-MM-DD と HH:MM で指定してください')
     return as_jst(datetime.strptime(f'{day} {time}', '%Y-%m-%d %H:%M'))
 
-REASONS = {'invalid_store':'店舗を選び直してください。', 'invalid_interval':'開始時刻は00分または30分で指定してください。', 'deadline':'開始3時間前を過ぎています。', 'too_far':'予約は2か月先の同日までです。', 'day_off':'休業日です。', 'outside_hours':'営業時間外です。', 'store_full':'店舗が満席です。', 'trainer_busy':'担当者の予定が入っています。', 'travel_conflict':'店舗間の移動時間を確保できません。', 'room_unknown':'個室の割当を確認できません。'}
+REASONS = {'invalid_store':'店舗を選び直してください。', 'invalid_interval':'開始時刻は00分または30分で指定してください。', 'deadline':'開始3時間前を過ぎています。', 'too_far':'予約は2か月先の同日までです。', 'day_off':'休業日です。', 'outside_hours':'営業時間外です。', 'store_full':'ご希望の時間は現在ご案内できません。別の日時を教えてくださいね。', 'trainer_busy':'ご希望の時間は現在ご案内できません。別の日時を教えてくださいね。', 'travel_conflict':'ご希望の時間は現在ご案内できません。別の日時を教えてくださいね。', 'room_unknown':'ご希望の時間は現在ご案内できません。別の日時を教えてくださいね。'}
