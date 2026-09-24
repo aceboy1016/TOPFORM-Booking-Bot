@@ -462,7 +462,7 @@ class LINEService:
         data['picker_filter'] = text
         data['picker_dates'] = [d.strftime('%Y-%m-%d') for d in dates[:63]]
         data['store'] = data.get('store') or 'both'
-        for key in ('time', 'pending_time', 'room', 'requested_time'):
+        for key in ('time', 'pending_time', 'room', 'requested_time', 'pending_datetime_text'):
             data.pop(key, None)
         if len(dates) == 1:
             data['date'] = data['picker_dates'][0]
@@ -492,6 +492,7 @@ class LINEService:
         cards = []
         displayed=[]
         displayed_slots=[]
+        unavailable=[]
         rows=[(date,store,note) for date in dates[date_offset:date_offset+(1 if only_store else 4)] for store in stores]
         def slots_for(date,store):
             return matching(get_available_slots(datetime.strptime(date,'%Y-%m-%d'),store,snapshot),data.get('filters',filters_from(data.get('picker_filter',''))))
@@ -524,6 +525,9 @@ class LINEService:
         for date,store,row_note in rows:
             day = datetime.strptime(date, '%Y-%m-%d')
             slots = slots_for(date,store)
+            if not slots:
+                unavailable.append(f'📅 {day:%m/%d}（{WEEKDAY_JP[day.weekday()]}）📍 {STORE_NAMES[store]}')
+                continue
             body = [{'type': 'text', 'text': '📅 '+day.strftime('%m/%d')+'（'+WEEKDAY_JP[day.weekday()]+'）', 'weight': 'bold', 'size': 'lg'},
                     {'type': 'text', 'text': '📍 '+STORE_NAMES[store], 'margin': 'md'},
                     {'type': 'text', 'text': row_note or ('空き時間をタップしてください👇'+('（'+filter_label(data.get('filters',{}))+'）' if data.get('filters') else '') if slots else '🌿 この日の空きはありません。別の日も聞いてくださいね。'), 'wrap': True, 'size': 'sm', 'margin': 'md'}]
@@ -562,7 +566,12 @@ class LINEService:
                 current_data['last_shown']=sorted(set(displayed))
                 current_data['shown_slots']=displayed_slots
                 await db.set_session(uid,'booking',current['flow_state'],json.dumps(current_data))
-        await self.reply_messages(token, [FlexMessage(alt_text='📅 空き時間を選んで仮予約へ😊', contents=FlexContainer.from_dict({'type':'carousel','contents':cards}))])
+        messages=[]
+        if unavailable:
+            messages.append(TextMessage(text='🌿 ご希望の条件では空きが見つかりませんでした。\n'+ '\n'.join(unavailable[:8]) + ('\n\nこちらの候補はいかがですか？😊\n選ぶまでは、ご希望の日付・店舗は変わりません。' if cards else '\n\n別の日付や時間帯を教えてくださいね😊')))
+        if cards:
+            messages.append(FlexMessage(alt_text='📅 空き時間を選んで予約の確認へ😊', contents=FlexContainer.from_dict({'type':'carousel','contents':cards})))
+        await self.reply_messages(token, messages)
 
     async def _handle_date_query(
         self, reply_token: str, user_id: str, target_date: datetime
@@ -919,12 +928,19 @@ class LINEService:
 
             data['confirmation_id'] = uuid.uuid4().hex
             await db.set_session(user_id, 'booking', 'confirm', json.dumps(data))
-            action = await db.make_action(user_id, {'a':'picker_confirm','confirmation_id':data['confirmation_id']})
+            action = await db.make_action(user_id, {'a':'picker_confirm','confirmation_id':data['confirmation_id'], 'selection': {k:data[k] for k in ('date','time','store','room','mode','target_booking_id','target_booking_type') if k in data}}, ttl=7*24*60)
             confirm_msg = confirm_msg.replace('よろしければ「確定」を押してください👇', 'スタッフ確認前の仮予約です。\n内容がよければ下のボタンを押してください😊')
-            card=self._build_confirm_flex('📋 仮予約の内容確認', confirm_msg, '✅ 仮予約を申し込む', action, '#15803D')
+            changing=data.get('mode')=='change'
+            title='🔄 変更内容の確認' if changing else '📋 仮予約の内容確認'
+            if changing:
+                original=data.get('original_booking_info',{})
+                original_dt=datetime.fromisoformat(original['dt']) if original.get('dt') else None
+                before=(f'📅 {original_dt:%m/%d}（{WEEKDAY_JP[original_dt.weekday()]}） 🕐 {original_dt:%H:%M}〜\n📍 {STORE_NAMES.get(original.get("store"),original.get("store",""))}' if original_dt else '選択した元の予約')
+                confirm_msg=f'変更前\n{before}\n\n変更後\n📅 {display_date}（{wd}）\n🕐 {time_range}\n📍 {store_display}\n\nこちらへの変更でよろしいですか？😊\nスタッフの承認までは、元の予約が残ります。'
+            card=self._build_confirm_flex(title, confirm_msg, '✅ この内容で変更を申し込む' if changing else '✅ 仮予約を申し込む', action, '#15803D')
             for label,text in [('📅 日時を変更','日時を変更したい'),('📍 店舗を変更','店舗を変更したい')]:
                 card['footer']['contents'].insert(-1,{'type':'button','height':'sm','action':{'type':'message','label':label,'text':text}})
-            await self.reply_flex(reply_token, '📋 仮予約の内容確認', card)
+            await self.reply_flex(reply_token, title, card)
 
         elif state == "resolve_room_conflict":
             if "変更する" in text:
@@ -1071,8 +1087,8 @@ class LINEService:
                             orig_text_user = (
                                 f"▼ 変更前\n"
                                 f" ・{odt.strftime('%m/%d')}（{owd}） {odt.strftime('%H:%M')}-\n"
-                                f" ・{orig_store}\n\n"
-                                f"↓↓↓↓↓\n\n"
+                                f"📍 {STORE_NAMES.get(orig_store, orig_store)}\n\n"
+                                f"\n"
                                 f"▼ 変更後\n"
                             )
                         except:
