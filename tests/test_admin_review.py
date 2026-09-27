@@ -168,3 +168,25 @@ async def test_change_rejected_keeps_original_and_sends_clear_receipt(service,da
     assert (await database.get_booking(old,'u'))['status']=='provisional'
     receipt=next(n for n in await database.notification_backlog() if n['recipient']=='u')
     assert '元の予約はそのまま' in receipt['body']
+
+
+@pytest.mark.parametrize('source',['db','calendar'])
+async def test_change_admin_notice_and_pending_show_before_after(service,database,source):
+    before=future().replace(hour=10,minute=0)
+    after=before.replace(hour=17)
+    await database.save_booking('u','ebisu',after.isoformat(),metadata={'customer_name':'架空太郎','room':'B','change_from':{'type':source,'id':'original','dt':before.isoformat(),'store':'hanzoomon'}})
+    notice=next(n for n in await database.notification_backlog() if n['recipient']==settings.ADMIN_USER_ID)
+    from admin_review import show_pending
+    await show_pending(service,'reply',settings.ADMIN_USER_ID)
+    for card in [json.loads(notice['body']),service.reply_flex.call_args.args[2]['contents'][0]]:
+        text=json.dumps(card,ensure_ascii=False)
+        assert '🔄 予約変更が届いています' in text
+        assert text.index('変更前（元の予約）')<text.index('10:00〜11:00')<text.index('半蔵門店')<text.index('変更後（ご希望）')<text.index('17:00〜18:00')<text.index('恵比寿店')
+        assert '個室希望：B' in text
+
+
+def test_legacy_change_card_does_not_invent_original_datetime():
+    from booking_cards import admin_card
+    text=json.dumps(admin_card({'slot_datetime':future().isoformat(),'store':'ebisu','metadata':{'change_from':{'id':'old','type':'db'}}},'approve','reject'),ensure_ascii=False)
+    assert '元の予約日時の記録がありません' in text
+    assert '変更後（ご希望）' in text

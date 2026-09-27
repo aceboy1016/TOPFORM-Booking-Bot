@@ -31,12 +31,21 @@ def button(label,token,primary=False):
 def admin_card(row,approve,reject):
     extra=row.get('metadata') or {}
     if isinstance(extra,str): extra=json.loads(extra)
-    contents=[{'type':'text','text':'👤 '+str(extra.get('customer_name') or 'お客様'),'weight':'bold','wrap':True}]+details(row)
+    contents=[{'type':'text','text':'👤 '+str(extra.get('customer_name') or 'お客様'),'weight':'bold','wrap':True}]
+    original=extra.get('change_from')
+    if original:
+        contents.append({'type':'text','text':'変更前（元の予約）','weight':'bold','color':'#64748B'})
+        if original.get('dt') and original.get('store'):
+            contents.extend(details({'slot_datetime':original['dt'],'store':original['store']}))
+        else:
+            contents.append({'type':'text','text':'元の予約日時の記録がありません。お客様との変更受付内容をご確認ください。','wrap':True,'size':'sm'})
+        contents.extend([{'type':'separator','margin':'md'},{'type':'text','text':'変更後（ご希望）','weight':'bold','color':'#167D8D'}])
+    contents.extend(details(row))
     contents.append({'type':'text','text':'🚪 個室希望：'+str(extra.get('room') or '指定なし'),'wrap':True,'size':'sm'})
     if extra.get('change_from'):
         contents.append({'type':'text','text':'🔄 予約変更のご希望です。承認まで元の予約は残ります。カレンダーの旧予定の変更・取消もお願いします。','wrap':True,'size':'sm'})
     contents.append({'type':'text','text':'カレンダー登録後、下のボタンで承認してください。お客様へ結果を通知します。','wrap':True,'size':'sm'})
-    return card('📥 ご予約が届いています','#167D8D',contents,[button('✅ 確定する',approve,True),button('今回は見送る',reject)])
+    return card('🔄 予約変更が届いています' if original else '📥 ご予約が届いています','#167D8D',contents,[button('✅ 確定する',approve,True),button('今回は見送る',reject)])
 
 
 def admin_notification(row):
