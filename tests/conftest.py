@@ -31,8 +31,9 @@ async def database(tmp_path,monkeypatch):
         if url:
             async with store.engine.begin() as conn: await conn.run_sync(metadata.drop_all)
     await store.init_db()
+    import candidate_options
     import database, line_service, booking_actions, booking_view, notifications, schedule_conversation, main, conversation, conversation_extras, admin_review
-    for module in (database,line_service,booking_actions,booking_view,notifications,schedule_conversation,main,conversation,conversation_extras,admin_review):
+    for module in (candidate_options,database,line_service,booking_actions,booking_view,notifications,schedule_conversation,main,conversation,conversation_extras,admin_review):
         monkeypatch.setattr(module,'db',store)
     yield store
     if hasattr(store,'collection'):
