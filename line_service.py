@@ -445,6 +445,9 @@ class LINEService:
 
     async def _process_select_date(self, reply_token, user_id, session, text, data):
         """Keep inquiries and booking selections in the same draft."""
+        from candidate_options import show as show_candidates
+        if data.get('mode')=='change' and await show_candidates(self,reply_token,user_id,text,data):
+            return
         dates = self._parse_multiple_dates(text)
         if not dates:
             from conversation_extras import clarify
