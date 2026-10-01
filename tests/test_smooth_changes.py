@@ -62,3 +62,18 @@ async def test_stale_confirmation_unavailable_returns_current_options(service,da
     assert not service.reply_flex.called
     assert service.reply_messages.called
     assert await database.get_user_bookings('u',True)==[]
+
+
+async def test_change_date_then_store_replies_without_forgetting_date(service,database):
+    bid,day=await reserve(database,hour=20)
+    await service.handle_text_message(event('予約変更'),user())
+    card=service.reply_flex.call_args.args[2]['contents'][0]
+    await service.handle_postback_event(event(data=json.loads(card['footer']['contents'][0]['action']['data'])),user())
+    desired=day+timedelta(days=2)
+    for message in [desired.strftime('%m/%d'),'半蔵門',desired.strftime('%m月%d日')]:
+        service.reply_messages.reset_mock()
+        await service.handle_text_message(event(message),user())
+        _,data=await state(database)
+        assert data['date']==desired.strftime('%Y-%m-%d')
+        assert data['target_booking_id']==bid
+        assert service.reply_messages.called
