@@ -212,7 +212,7 @@ class FirestoreDatabase:
         async def operation(unit):
             ref = self.ref('sessions', line_user_id)
             row = await unit.get(ref)
-            if row and datetime.now(JST) - as_jst(datetime.fromisoformat(row['updated_at'])) > timedelta(minutes=settings.SESSION_TTL_MINUTES):
+            if row and datetime.now(JST) - as_jst(datetime.fromisoformat(row['updated_at'])) > timedelta(minutes=settings.BOOKING_SESSION_TTL_MINUTES if row["flow_type"]=="booking" else settings.SESSION_TTL_MINUTES):
                 unit.delete(ref)
                 return None
             return row

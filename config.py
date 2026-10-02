@@ -43,6 +43,7 @@ class Settings:
     ADMIN_API_TOKEN: str = os.getenv("ADMIN_API_TOKEN", "")
     CUSTOMER_SHEET_NAME: str = os.getenv("CUSTOMER_SHEET_NAME", "")
     SESSION_TTL_MINUTES: int = 30
+    BOOKING_SESSION_TTL_MINUTES: int = 7*24*60
     REQUIRE_PERSISTENT_DB: bool = bool(os.getenv("K_SERVICE"))
 
     # Google Sheets (顧客マスタ)

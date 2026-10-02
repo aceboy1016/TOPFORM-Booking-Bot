@@ -151,7 +151,7 @@ class Database:
             row=(await conn.execute(select(sessions).where(sessions.c.line_user_id==line_user_id))).mappings().first()
             if not row: return None
             updated=as_jst(datetime.fromisoformat(row['updated_at']))
-            if datetime.now(JST)-updated>timedelta(minutes=settings.SESSION_TTL_MINUTES):
+            if datetime.now(JST)-updated>timedelta(minutes=settings.BOOKING_SESSION_TTL_MINUTES if row["flow_type"]=="booking" else settings.SESSION_TTL_MINUTES):
                 await conn.execute(delete(sessions).where(sessions.c.line_user_id==line_user_id));return None
             return dict(row)
 
