@@ -30,7 +30,7 @@ async def test_failed_notification_remains(database):
 
 async def test_session_expiry(database):
     await database.set_session('u','booking','confirm','{}')
-    await patch_rows(database,sessions,{'updated_at':(datetime.now(JST)-timedelta(hours=1)).isoformat()})
+    await patch_rows(database,sessions,{'updated_at':(datetime.now(JST)-timedelta(days=8)).isoformat()})
     assert await database.get_session('u') is None
 
 async def test_action_belongs_to_user(database):

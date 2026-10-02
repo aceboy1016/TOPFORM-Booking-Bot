@@ -78,7 +78,9 @@ async def handle_action(service,event,user):
         session = await db.get_session(uid)
         context = json.loads(session.get('flow_data', '{}')) if session else {}
         if action == 'picker_confirm':
-            valid = session and session.get('flow_type') == 'booking' and session.get('flow_state') == 'confirm' and context.get('confirmation_id') == data.get('confirmation_id')
+            selection=data.get('selection') or {}
+            same_selection=bool(selection) and all(context.get(k)==selection.get(k) for k in ('date','time','store','room','mode','target_booking_id','target_booking_type'))
+            valid = session and session.get('flow_type') == 'booking' and session.get('flow_state') == 'confirm' and (context.get('confirmation_id') == data.get('confirmation_id') or same_selection)
             if not valid:
                 selection=data.get('selection')
                 if session and session.get('flow_type')=='booking' and selection:
