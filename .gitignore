@@ -15,3 +15,4 @@ service-account*.json
 *.key
 *.sqlite*
 backups/
+.clasp.json
