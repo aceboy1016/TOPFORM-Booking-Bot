@@ -28,7 +28,7 @@ function harness() {
     }},ScriptApp:{getProjectTriggers:()=>[],deleteTrigger:()=>{},newTrigger:()=>({timeBased:()=>({everyMinutes:()=>({create:()=>{}})})})}
   });
   ['Content.js','Code.js'].forEach(f=>vm.runInContext(fs.readFileSync(__dirname+'/gas/'+f,'utf8'),c));
-  return {c,p,calls,responses,time:t=>now=t,run:s=>vm.runInContext(s,c),state:()=>JSON.parse(p.EXERCISE_STATE||'{}'),pushes:()=>calls.filter(x=>x.url.endsWith('/message/push'))};
+  return {c,p,calls,responses,time:t=>now=t,run:s=>vm.runInContext(s,c),state:(id=p.RECIPIENT_USER_ID)=>JSON.parse(p['EXERCISE_STATE_'+id]||p.EXERCISE_STATE||'{}'),pushes:()=>calls.filter(x=>x.url.endsWith('/message/push'))};
 }
 test('weekday schedule delivers once, correct hero/text, repeats and restart are safe',()=>{
  const h=harness();h.run('exerciseReminderTick()');assert.equal(h.state().job.minute,540);assert.equal(h.pushes().length,0);
@@ -44,7 +44,7 @@ test('disabled/weekends/outside time window never send, including JST vs UTC',()
  h.p.ENABLED='true';h.time('2026-10-12T00:00:00+09:00');h.run('exerciseReminderTick()');assert.equal(h.state().job.day,'2026-10-12');
 });
 test('ambiguous timeout retries identical payload/key; LINE accepted 409 completes',()=>{
- const h=harness();h.run('exerciseReminderTick()');h.time('2026-10-06T09:00:00+09:00');h.responses.push('timeout');assert.throws(()=>h.run('exerciseReminderTick()'),/timeout/);
+ const h=harness();h.run('exerciseReminderTick()');h.time('2026-10-06T09:00:00+09:00');h.responses.push('timeout');assert.throws(()=>h.run('exerciseReminderTick()'),/配信/);
  h.responses.push({code:409,headers:{'x-line-accepted-request-id':'accepted'}});h.run('exerciseReminderTick()');assert.equal(h.pushes().length,2);assert.deepEqual(h.pushes()[0].options,h.pushes()[1].options);assert.equal(h.state().sentCount,1);
  h.run('exerciseReminderTick()');assert.equal(h.pushes().length,2);
 });
@@ -57,11 +57,35 @@ test('old failed job is never caught up tomorrow or after 17:00',()=>{
  h.time('2026-10-06T17:00:00+09:00');h.run('exerciseReminderTick()');assert.equal(h.pushes().length,1);
  h.time('2026-10-07T08:00:00+09:00');h.run('exerciseReminderTick()');assert.equal(h.state().job.day,'2026-10-07');assert.equal(h.pushes().length,1);
 });
-test('recipient mutation cannot reroute persisted daily message',()=>{
- const h=harness();h.run('exerciseReminderTick()');h.p.RECIPIENT_USER_ID='U'+'b'.repeat(32);h.time('2026-10-06T09:00:00+09:00');assert.throws(()=>h.run('exerciseReminderTick()'),/送信先/);assert.equal(h.pushes().length,0);
+test('removing a recipient never sends their pending job',()=>{
+ const h=harness();h.run('exerciseReminderTick()');h.p.RECIPIENT_USER_ID='U'+'b'.repeat(32);
+ h.time('2026-10-06T09:00:00+09:00');h.run('exerciseReminderTick()');assert.equal(h.pushes().length,0);
+ h.time('2026-10-06T09:05:00+09:00');h.run('exerciseReminderTick()');assert.equal(h.pushes().length,1);
+ assert.equal(JSON.parse(h.pushes()[0].options.payload).to,h.p.RECIPIENT_USER_ID);
 });
 test('validation has no pushes; monthly reset; random schedule remains in window',()=>{
  const h=harness();h.run('validateExerciseReminder()');assert.equal(h.pushes().length,0);
  h.p.EXERCISE_STATE=JSON.stringify({month:'2026-09',sentCount:25});h.run('exerciseReminderTick()');assert.equal(h.state().sentCount,0);
  for(const random of [0,0.5,0.999999]){h.c.Math.random=()=>random;const job=h.run('plan_(config_(), {}, localClock_(new Date()))');assert.ok(job.minute>=540&&job.minute<=1015);}
+});
+
+test('two recipients have independent daily state, failures, budget and repeat protection',()=>{
+ const h=harness(), second='U'+'b'.repeat(32);
+ h.p.RECIPIENTS_JSON=JSON.stringify([{id:h.p.RECIPIENT_USER_ID,name:'test'},{id:second,name:'test'}]);
+ h.run('exerciseReminderTick()');h.time('2026-10-06T09:00:00+09:00');h.responses.push('timeout');
+ assert.throws(()=>h.run('exerciseReminderTick()'));
+ assert.equal(h.state().job.status,'sending');assert.equal(h.state(second).job.status,'sent');
+ h.responses.push({code:409,headers:{'x-line-accepted-request-id':'accepted'}});h.run('exerciseReminderTick()');
+ assert.equal(h.state().sentCount,1);assert.equal(h.state(second).sentCount,1);
+ assert.equal(h.pushes().length,3);h.run('exerciseReminderTick()');assert.equal(h.pushes().length,3);
+});
+test('invalid or duplicate recipient lists fail closed',()=>{
+ for(const recipients of [[],[{id:'bad',name:'a'}],[{id:'U'+'a'.repeat(32),name:'a'},{id:'U'+'a'.repeat(32),name:'a'}]]){
+  const h=harness();h.p.RECIPIENTS_JSON=JSON.stringify(recipients);
+  assert.throws(()=>h.run('exerciseReminderTick()'));assert.equal(h.pushes().length,0);
+ }
+});
+test('single-recipient legacy sent state migrates without a second send',()=>{
+ const h=harness();h.p.EXERCISE_STATE=JSON.stringify({month:'2026-10',sentCount:1,job:{day:'2026-10-06',to:h.p.RECIPIENT_USER_ID,status:'sent'}});
+ h.time('2026-10-06T09:00:00+09:00');h.run('exerciseReminderTick()');assert.equal(h.pushes().length,0);
 });

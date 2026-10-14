@@ -1,4 +1,4 @@
-/* Single-recipient GAS delivery. No booking sessions, calendars or AI calls. */
+/* Explicit-recipient GAS delivery (up to two). No booking sessions, calendars or AI calls. */
 const REMINDER_TZ = 'Asia/Tokyo';
 const STATE_KEY = 'EXERCISE_STATE';
 const HANDLER = 'exerciseReminderTick';
@@ -10,10 +10,20 @@ function localClock_(now) {
     minute:Number(Utilities.formatDate(now, REMINDER_TZ, 'HH'))*60+
       Number(Utilities.formatDate(now, REMINDER_TZ, 'mm'))};
 }
-function config_() {
+function configs_() {
+  const p=PropertiesService.getScriptProperties();
+  const raw=p.getProperty('RECIPIENTS_JSON');
+  if (!raw) return [config_()];
+  const recipients=JSON.parse(raw);
+  if (!Array.isArray(recipients) || recipients.length<1 || recipients.length>2 ||
+      new Set(recipients.map(r=>r.id)).size!==recipients.length)
+    throw new Error('配信先は重複のない1〜2名を指定してください。');
+  return recipients.map(r=>config_(r));
+}
+function config_(recipient) {
   const p = PropertiesService.getScriptProperties();
-  const c = {token:p.getProperty('LINE_CHANNEL_ACCESS_TOKEN'), to:p.getProperty('RECIPIENT_USER_ID'),
-    name:p.getProperty('EXPECTED_RECIPIENT_NAME'), bot:p.getProperty('EXPECTED_BOT_NAME'),
+  const c = {token:p.getProperty('LINE_CHANNEL_ACCESS_TOKEN'), to:recipient?recipient.id:p.getProperty('RECIPIENT_USER_ID'),
+    name:recipient?recipient.name:p.getProperty('EXPECTED_RECIPIENT_NAME'), bot:p.getProperty('EXPECTED_BOT_NAME'),
     imageBase:p.getProperty('IMAGE_BASE_URL'), reserve:Number(p.getProperty('RESERVE_MESSAGES') || '50')};
   if (!c.token || !/^U[0-9a-f]{32}$/.test(c.to || '') || !c.name || !c.bot ||
       !/^https:\/\//.test(c.imageBase || '') || !Number.isInteger(c.reserve) || c.reserve<0)
@@ -50,8 +60,14 @@ function card_(c,item) {
     footer:{type:'box',layout:'vertical',contents:[
       {type:'text',text:'配信の停止はスタッフにお知らせください。',size:'xs',color:'#888888',wrap:true}]}}};
 }
-function readState_(p) {return JSON.parse(p.getProperty(STATE_KEY)||'{}');}
-function saveState_(p,s) {p.setProperty(STATE_KEY,JSON.stringify(s));}
+function stateKey_(to) {return to?STATE_KEY+'_'+to:STATE_KEY;}
+function readState_(p,to) {
+  const current=p.getProperty(stateKey_(to));
+  if(current) return JSON.parse(current);
+  const legacy=JSON.parse(p.getProperty(STATE_KEY)||'{}');
+  return to && legacy.job && legacy.job.to!==to?{}:legacy;
+}
+function saveState_(p,s,to) {p.setProperty(stateKey_(to),JSON.stringify(s));}
 function choose_(last) {
   const candidates=EXERCISE_CONTENT.filter(x=>x.id!==last);
   return candidates[Math.floor(Math.random()*candidates.length)];
@@ -72,9 +88,17 @@ function exerciseReminderTick() {
     if (p.getProperty('ENABLED')!=='true') return;
     const clock=localClock_(new Date());
     if (clock.weekday===0 || clock.weekday===6 || clock.minute>=1020) return;
-    const c=config_(), s=readState_(p);
+    const errors=[];
+    configs_().forEach(c=>{
+      try {deliverRecipient_(p,c,clock);} catch (_) {errors.push('配信処理でエラー');}
+    });
+    if(errors.length) throw new Error(errors.length+'名の配信でエラー。送信状態を確認してください。');
+  } finally {lock.releaseLock();}
+}
+function deliverRecipient_(p,c,clock) {
+    const s=readState_(p,c.to);
     if (s.month!==clock.month) {s.month=clock.month;s.sentCount=0;}
-    if (!s.job || s.job.day!==clock.day) {s.job=plan_(c,s,clock);saveState_(p,s);}
+    if (!s.job || s.job.day!==clock.day) {s.job=plan_(c,s,clock);saveState_(p,s,c.to);}
     const j=s.job;
     if (!j || j.status==='sent' || j.status==='failed' || clock.minute<540 || clock.minute<j.minute) return;
     if (j.to!==c.to) throw new Error('送信先が変更されています。一度停止して設定を確認してください。');
@@ -85,23 +109,23 @@ function exerciseReminderTick() {
     if (quota.type!=='limited' || !Number.isFinite(quota.value) || !Number.isFinite(used.totalUsage))
       throw new Error('LINE送信枠を確認できないため配信を見送りました。');
     if (quota.value-used.totalUsage<=c.reserve) return;
-    j.status='sending';saveState_(p,s); // persist exact payload/key before network call
+    j.status='sending';saveState_(p,s,c.to); // persist exact payload/key before network call
     const r=line_(c,'message/push',{to:j.to,messages:[j.message]},j.retryKey);
     if (r.code===200 || (r.code===409 && r.accepted)) {
       j.status='sent';j.acceptedAt=new Date().toISOString();s.lastContent=j.content;
-      s.sentCount=(s.sentCount||0)+1;saveState_(p,s);
+      s.sentCount=(s.sentCount||0)+1;saveState_(p,s,c.to);
     } else if (r.code===429 || r.code>=500) {
-      j.status='retry';saveState_(p,s); // same day only; LINE retry key valid for 24h
+      j.status='retry';saveState_(p,s,c.to); // same day only; LINE retry key valid for 24h
       throw new Error('LINE一時エラー（HTTP '+r.code+'）。時間内に同じキーで再試行します。');
     } else {
-      j.status='failed';j.errorCode=r.code;saveState_(p,s);
+      j.status='failed';j.errorCode=r.code;saveState_(p,s,c.to);
       throw new Error('LINE送信を停止しました（HTTP '+r.code+'）。設定を確認してください。');
     }
-  } finally {lock.releaseLock();}
 }
 // Validates all five cards and remote images, but never sends a LINE message.
 function validateExerciseReminder() {
-  const c=config_();verifyIdentity_(c);
+  const recipients=configs_();recipients.forEach(verifyIdentity_);
+  const c=recipients[0];
   EXERCISE_CONTENT.forEach(item=>{
     const url=c.imageBase.replace(/\/$/,'')+'/'+item.id+'.png';
     const img=UrlFetchApp.fetch(url,{muteHttpExceptions:true});
@@ -132,7 +156,10 @@ function stopExerciseReminder() {
   } finally {lock.releaseLock();}
 }
 function exerciseReminderStatus() {
-  const p=PropertiesService.getScriptProperties(),s=readState_(p);
-  return {enabled:p.getProperty('ENABLED')==='true',month:s.month||null,sentCount:s.sentCount||0,
-    day:s.job?s.job.day:null,plannedMinute:s.job?s.job.minute:null,status:s.job?s.job.status:null};
+  const p=PropertiesService.getScriptProperties();
+  return {enabled:p.getProperty('ENABLED')==='true',recipients:configs_().map(c=>{
+    const s=readState_(p,c.to);
+    return {name:c.name,month:s.month||null,sentCount:s.sentCount||0,
+      day:s.job?s.job.day:null,plannedMinute:s.job?s.job.minute:null,status:s.job?s.job.status:null};
+  })};
 }
