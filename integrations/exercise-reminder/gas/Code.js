@@ -164,3 +164,8 @@ function exerciseReminderStatus() {
       day:s.job?s.job.day:null,plannedMinute:s.job?s.job.minute:null,status:s.job?s.job.status:null};
   })};
 }
+
+// Log only delivery status and display names, never credentials or recipient IDs.
+function logExerciseReminderStatus() {
+  console.log(JSON.stringify(exerciseReminderStatus()));
+}
