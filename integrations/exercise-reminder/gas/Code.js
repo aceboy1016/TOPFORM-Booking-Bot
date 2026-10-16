@@ -2,6 +2,8 @@
 const REMINDER_TZ = 'Asia/Tokyo';
 const STATE_KEY = 'EXERCISE_STATE';
 const HANDLER = 'exerciseReminderTick';
+const DELIVERY_MINUTE = 14 * 60;
+const DELIVERY_END = DELIVERY_MINUTE + 30;
 
 function localClock_(now) {
   const day = Utilities.formatDate(now, REMINDER_TZ, 'yyyy-MM-dd');
@@ -73,11 +75,10 @@ function choose_(last) {
   return candidates[Math.floor(Math.random()*candidates.length)];
 }
 function plan_(c,s,clock) {
-  // Five-minute poll plus slack: never deliberately schedule at the 17:00 boundary.
-  const earliest=Math.max(540,clock.minute+5);
-  if (earliest>1015) return null;
+  // Allow a short delay/retry window; never catch up in the evening.
+  if (clock.minute>=DELIVERY_END) return null;
   const item=choose_(s.lastContent);
-  return {day:clock.day,minute:earliest+Math.floor(Math.random()*(1016-earliest)),
+  return {day:clock.day,minute:DELIVERY_MINUTE,
     to:c.to, content:item.id, message:card_(c,item),retryKey:Utilities.getUuid(),status:'planned'};
 }
 function exerciseReminderTick() {
@@ -87,7 +88,7 @@ function exerciseReminderTick() {
     const p=PropertiesService.getScriptProperties();
     if (p.getProperty('ENABLED')!=='true') return;
     const clock=localClock_(new Date());
-    if (clock.weekday===0 || clock.weekday===6 || clock.minute>=1020) return;
+    if (clock.weekday===0 || clock.weekday===6 || clock.minute>=DELIVERY_END) return;
     const errors=[];
     configs_().forEach(c=>{
       try {deliverRecipient_(p,c,clock);} catch (_) {errors.push('配信処理でエラー');}
@@ -100,7 +101,7 @@ function deliverRecipient_(p,c,clock) {
     if (s.month!==clock.month) {s.month=clock.month;s.sentCount=0;}
     if (!s.job || s.job.day!==clock.day) {s.job=plan_(c,s,clock);saveState_(p,s,c.to);}
     const j=s.job;
-    if (!j || j.status==='sent' || j.status==='failed' || clock.minute<540 || clock.minute<j.minute) return;
+    if (!j || j.status==='sent' || j.status==='failed' || clock.minute<DELIVERY_MINUTE) return;
     if (j.to!==c.to) throw new Error('送信先が変更されています。一度停止して設定を確認してください。');
     if ((s.sentCount||0)>=25) return;
     const quota=getLine_(c,'message/quota'), used=getLine_(c,'message/quota/consumption');
@@ -143,7 +144,7 @@ function startExerciseReminder() {
     ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()===HANDLER).forEach(ScriptApp.deleteTrigger);
     ScriptApp.newTrigger(HANDLER).timeBased().everyMinutes(5).create();
     PropertiesService.getScriptProperties().setProperty('ENABLED','true');
-    return '配信を開始しました。月〜金の9〜17時に1日1回送信します。';
+    return '配信を開始しました。月〜金の14:00に1日1回送信します（実行に数分の遅れが生じる場合があります）。';
   } finally {lock.releaseLock();}
 }
 function stopExerciseReminder() {
@@ -162,4 +163,9 @@ function exerciseReminderStatus() {
     return {name:c.name,month:s.month||null,sentCount:s.sentCount||0,
       day:s.job?s.job.day:null,plannedMinute:s.job?s.job.minute:null,status:s.job?s.job.status:null};
   })};
+}
+
+// Log only delivery status and display names, never credentials or recipient IDs.
+function logExerciseReminderStatus() {
+  console.log(JSON.stringify(exerciseReminderStatus()));
 }
