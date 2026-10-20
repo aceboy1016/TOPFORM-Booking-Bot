@@ -1,6 +1,6 @@
 import json
 from datetime import datetime,timedelta
-from booking_rules import JST
+from booking_rules import JST, hours_for
 from database import sessions
 from tests.storage_helpers import patch_rows
 from tests.test_flows import event,user,customer
@@ -12,7 +12,7 @@ async def test_delayed_change_selection_and_confirmation_keep_original(service,d
     card=service.reply_flex.call_args.args[2]['contents'][0]
     await service.handle_postback_event(event(data=json.loads(card['footer']['contents'][0]['action']['data'])),user())
     target=day+timedelta(days=7)
-    while target.weekday()>4: target+=timedelta(days=1)
+    while hours_for(target)['end'] < 22: target+=timedelta(days=1)
     action=json.loads(await database.make_action('u',{'a':'pick_slot','date':target.strftime('%Y-%m-%d'),'store':'hanzoomon','time':'21:00'},ttl=10080))
     await patch_rows(database,sessions,{'updated_at':(datetime.now(JST)-timedelta(hours=2)).isoformat()})
     await service.handle_postback_event(event(data=action),user())

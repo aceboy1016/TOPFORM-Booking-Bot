@@ -74,6 +74,14 @@ async def handle_action(service,event,user):
         from conversation_extras import confirm_support
         await confirm_support(service,token,uid,user,context)
         return
+    if action == 'bulk_room_pick':
+        current = await db.get_session(uid)
+        context = json.loads(current.get('flow_data', '{}')) if current else {}
+        if context.get('mode') == 'change' or context.get('intent') in ('change', 'cancel'):
+            await service.reply_text(token, '📅 このカードは新しい予約用です。変更中の操作を終えてから選んでください😊')
+            return
+        await db.set_session(uid, 'booking', 'select_date', json.dumps({'room_pref': user.get('room_pref')}))
+        action = 'pick_slot'
     if action in ('pick_slot', 'picker_page', 'picker_confirm'):
         session = await db.get_session(uid)
         context = json.loads(session.get('flow_data', '{}')) if session else {}
