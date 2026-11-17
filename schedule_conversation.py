@@ -79,6 +79,9 @@ async def route(service,event,user,session):
             return True
     # Leave negative/aborted changes and cancellation to the existing safe router.
     if not CHANGE.search(text) or re.search(r'取り消|取消|キャンセル|やめ|中止|しない|しません|せず|不要',text): return False
+    # Several "AをBに" in one message need a card each; split_change holds only one.
+    from change_pairs import show as show_pairs
+    if await show_pairs(service,token,uid,user,text): return True
     source,desired=split_change(text)
     if session and session.get('flow_type')=='booking' and len(date_mentions(text))<2:
         if changing or not re.search(r'予約|予定|トレーニング|ですが|時間の変更',source):
