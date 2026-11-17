@@ -1,12 +1,31 @@
 """Administrator-only LINE approval using existing Calendar registration."""
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 from database import db
-from config import settings
+from config import settings, STORE_NAMES
 from booking_rules import JST, as_jst
 from booking_cards import admin_card, card, details, button
 from calendar_service import find_user_bookings
 from sheets_service import sheets_service
 from async_services import google_call
+
+
+def summary(row):
+    """Name the booking just decided on; several approvals look alike otherwise."""
+    extra = row.get('metadata') or {}
+    if isinstance(extra, str): extra = json.loads(extra)
+    def stamp(value):
+        slot = as_jst(datetime.fromisoformat(value))
+        return (slot.strftime('%m/%d') + '（' + '月火水木金土日'[slot.weekday()] + '）'
+                + slot.strftime('%H:%M') + '〜' + (slot + timedelta(hours=1)).strftime('%H:%M'))
+    lines = ['👤 ' + str(extra.get('customer_name') or 'お客様') + ' 様',
+             '📅 ' + stamp(row['slot_datetime']),
+             '📍 ' + STORE_NAMES.get(row['store'], row['store'])]
+    original = extra.get('change_from') or {}
+    if original.get('dt'):
+        lines.append('🔄 変更前：' + stamp(original['dt'])
+                     + ' ' + STORE_NAMES.get(original.get('store'), original.get('store') or ''))
+    return '\n'.join(lines)
 
 
 async def show_pending(service,token,uid,offset=0):
@@ -53,4 +72,7 @@ async def handle(service,token,uid,data):
         calendar_id=matches[0].id
     elif decision!='reject_confirm': return
     changed=await db.review_booking(row['public_id'],'confirmed' if decision=='approve' else 'rejected',calendar_id)
-    await service.reply_text(token,('✅ 予約を確定しました。' if decision=='approve' else '予約を見送りました。')+'\nお客様への結果カードの送信を受け付けました。\n\n「承認待ち」で残りの予約を確認できます。' if changed else '💡 この予約はすでに処理済みです。再通知はしていません。')
+    if not changed:
+        await service.reply_text(token,'💡 この予約はすでに処理済みです。再通知はしていません。\n\n'+summary(row));return
+    headline='✅ 予約を確定しました。' if decision=='approve' else '予約を見送りました。'
+    await service.reply_text(token,headline+'\n\n'+summary(row)+'\n\nお客様への結果カードの送信を受け付けました。\n「承認待ち」で残りの予約を確認できます。')

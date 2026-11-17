@@ -190,3 +190,29 @@ def test_legacy_change_card_does_not_invent_original_datetime():
     text=json.dumps(admin_card({'slot_datetime':future().isoformat(),'store':'ebisu','metadata':{'change_from':{'id':'old','type':'db'}}},'approve','reject'),ensure_ascii=False)
     assert '元の予約日時の記録がありません' in text
     assert '変更後（ご希望）' in text
+
+
+async def test_approval_names_the_booking_it_confirmed(service,database):
+    row,tokens,_=await request(database)
+    calendar(service)
+    await service.handle_postback_event(admin_event(data=tokens[0]),user())
+    reply=service.reply_text.call_args.args[1]
+    slot=future()
+    assert '✅ 予約を確定しました。' in reply
+    assert '架空太郎' in reply
+    assert slot.strftime('%m/%d') in reply and slot.strftime('%H:%M') in reply
+    assert '恵比寿店' in reply
+
+
+async def test_approval_of_a_change_shows_the_slot_it_replaces(service,database):
+    old=(future()-timedelta(days=2)).isoformat()
+    ident=await database.save_booking('u','ebisu',future().isoformat(),metadata={
+        'customer_name':'架空太郎','room':None,
+        'change_from':{'id':'old','type':'db','dt':old,'store':'hanzoomon'}})
+    notice=next(n for n in await database.notification_backlog() if n['recipient']==settings.ADMIN_USER_ID)
+    approve=json.loads(json.loads(notice['body'])['footer']['contents'][0]['action']['data'])
+    calendar(service)
+    await service.handle_postback_event(admin_event(data=approve),user())
+    reply=service.reply_text.call_args.args[1]
+    assert '変更前' in reply and '半蔵門店' in reply
+    assert (future()-timedelta(days=2)).strftime('%m/%d') in reply
