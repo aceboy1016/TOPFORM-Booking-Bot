@@ -40,3 +40,48 @@ jobs:
         env:
           FIRESTORE_EMULATOR_HOST: 127.0.0.1:8681
           TEST_FIRESTORE: '1'
+
+  # Build and deploy a review revision. Traffic is never switched here:
+  # docs/ROLLOUT.md requires promotion to name the revision deliberately.
+  # Skipped until the GCP side is configured (docs/DEPLOY-FROM-GITHUB.md).
+  deploy:
+    needs: tests
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && vars.GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy-cloud-run
+      cancel-in-progress: false
+    env:
+      PROJECT: topform-booking-bot
+      SERVICE: topform-booking-bot
+      REGION: asia-northeast1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Refuse to deploy over an incomplete service configuration
+        run: |
+          gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format=json \
+            | python3 scripts/check_deploy_config.py
+      - name: Deploy a review revision without traffic
+        run: |
+          gcloud run deploy "$SERVICE" --project "$PROJECT" --region "$REGION" \
+            --source . --no-traffic --tag review --quiet
+      - name: Report what is live and what is waiting
+        run: |
+          echo '### Review revision deployed' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Traffic is unchanged. Promote with the "Promote Cloud Run revision" workflow.' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '| tag/revision | traffic |' >> "$GITHUB_STEP_SUMMARY"
+          echo '| --- | --- |' >> "$GITHUB_STEP_SUMMARY"
+          gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" \
+            --format='value[separator="|"](status.traffic[].revisionName,status.traffic[].percent,status.traffic[].tag)' \
+            | awk -F'|' '{print "| " $1 " " $3 " | " $2 "% |"}' >> "$GITHUB_STEP_SUMMARY"

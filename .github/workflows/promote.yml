@@ -1,0 +1,57 @@
+# Switching production traffic stays a deliberate act (docs/ROLLOUT.md).
+# This workflow only makes that act visible and repeatable; it never runs on push.
+name: Promote Cloud Run revision
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: 'Revision to serve 100% traffic (e.g. topform-booking-bot-00123-abc). Leave blank to only show the current traffic.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy-cloud-run
+      cancel-in-progress: false
+    env:
+      PROJECT: topform-booking-bot
+      SERVICE: topform-booking-bot
+      REGION: asia-northeast1
+      REVISION: ${{ inputs.revision }}
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Show current traffic
+        run: |
+          gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" \
+            --format='table(status.traffic[].revisionName,status.traffic[].percent,status.traffic[].tag)' \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Refuse an unknown revision
+        if: inputs.revision != ''
+        run: |
+          gcloud run revisions describe "$REVISION" --project "$PROJECT" --region "$REGION" \
+            --format='value(metadata.name)' > /dev/null
+      - name: Send all traffic to the chosen revision
+        if: inputs.revision != ''
+        run: |
+          gcloud run services update-traffic "$SERVICE" --project "$PROJECT" --region "$REGION" \
+            --to-revisions "$REVISION=100" --quiet
+      - name: Show traffic after promotion
+        if: inputs.revision != ''
+        run: |
+          echo '### Promoted' >> "$GITHUB_STEP_SUMMARY"
+          gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" \
+            --format='table(status.traffic[].revisionName,status.traffic[].percent,status.traffic[].tag)' \
+            | tee -a "$GITHUB_STEP_SUMMARY"
