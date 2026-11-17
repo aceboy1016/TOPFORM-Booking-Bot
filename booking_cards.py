@@ -28,6 +28,20 @@ def button(label,token,primary=False):
     return result
 
 
+def review_label(row):
+    """Identity carried inside the review button itself.
+
+    The button's action record is read on every press anyway, so naming the
+    booking from here costs no extra lookup once it has left the pending list.
+    """
+    extra=row.get('metadata') or {}
+    if isinstance(extra,str): extra=json.loads(extra)
+    label={'n':str(extra.get('customer_name') or '')[:40],'d':row['slot_datetime'],'s':row['store']}
+    original=extra.get('change_from') or {}
+    if original.get('dt'): label.update(o=original['dt'],os=original.get('store') or '')
+    return label
+
+
 def admin_card(row,approve,reject):
     extra=row.get('metadata') or {}
     if isinstance(extra,str): extra=json.loads(extra)
@@ -54,7 +68,7 @@ def admin_notification(row):
     for decision in ('approve','reject'):
         ident=str(uuid.uuid5(uuid.NAMESPACE_URL,'admin-review:'+row['public_id']+':'+decision))
         records.append(dict(id=ident,line_user_id=settings.ADMIN_USER_ID,
-                            payload=json.dumps({'a':'admin_review','bid':row['public_id'],'decision':decision}),
+                            payload=json.dumps({'a':'admin_review','bid':row['public_id'],'decision':decision,'label':review_label(row)}),
                             expires_at=(as_jst(datetime.fromisoformat(row['created_at']))+timedelta(days=7)).isoformat()))
         tokens.append(json.dumps({'a':'action','id':ident}))
     return admin_card(row,*tokens),records

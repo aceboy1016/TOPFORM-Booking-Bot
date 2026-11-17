@@ -4,28 +4,35 @@ from datetime import datetime, timedelta
 from database import db
 from config import settings, STORE_NAMES
 from booking_rules import JST, as_jst
-from booking_cards import admin_card, card, details, button
+from booking_cards import admin_card, card, details, button, review_label
 from calendar_service import find_user_bookings
 from sheets_service import sheets_service
 from async_services import google_call
 
 
+def _stamp(value):
+    slot = as_jst(datetime.fromisoformat(value))
+    return (slot.strftime('%m/%d') + '（' + '月火水木金土日'[slot.weekday()] + '）'
+            + slot.strftime('%H:%M') + '〜' + (slot + timedelta(hours=1)).strftime('%H:%M'))
+
+
+def summary_of(label):
+    """Render the identity a review button carries; None when it is unusable."""
+    try:
+        lines = ['👤 ' + (str(label.get('n')) or 'お客様') + ' 様',
+                 '📅 ' + _stamp(label['d']),
+                 '📍 ' + STORE_NAMES.get(label['s'], label['s'])]
+        if label.get('o'):
+            lines.append('🔄 変更前：' + _stamp(label['o'])
+                         + ' ' + STORE_NAMES.get(label.get('os'), label.get('os') or ''))
+        return '\n'.join(lines)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+
 def summary(row):
     """Name the booking just decided on; several approvals look alike otherwise."""
-    extra = row.get('metadata') or {}
-    if isinstance(extra, str): extra = json.loads(extra)
-    def stamp(value):
-        slot = as_jst(datetime.fromisoformat(value))
-        return (slot.strftime('%m/%d') + '（' + '月火水木金土日'[slot.weekday()] + '）'
-                + slot.strftime('%H:%M') + '〜' + (slot + timedelta(hours=1)).strftime('%H:%M'))
-    lines = ['👤 ' + str(extra.get('customer_name') or 'お客様') + ' 様',
-             '📅 ' + stamp(row['slot_datetime']),
-             '📍 ' + STORE_NAMES.get(row['store'], row['store'])]
-    original = extra.get('change_from') or {}
-    if original.get('dt'):
-        lines.append('🔄 変更前：' + stamp(original['dt'])
-                     + ' ' + STORE_NAMES.get(original.get('store'), original.get('store') or ''))
-    return '\n'.join(lines)
+    return summary_of(review_label(row))
 
 
 async def show_pending(service,token,uid,offset=0):
@@ -36,7 +43,7 @@ async def show_pending(service,token,uid,offset=0):
     if offset>=len(rows): offset=0
     cards=[]
     for row in rows[offset:offset+9]:
-        tokens=[await db.make_action(uid,{'a':'admin_review','bid':row['public_id'],'decision':decision},ttl=7*24*60) for decision in ('approve','reject')]
+        tokens=[await db.make_action(uid,{'a':'admin_review','bid':row['public_id'],'decision':decision,'label':review_label(row)},ttl=7*24*60) for decision in ('approve','reject')]
         cards.append(admin_card(row,*tokens))
     if offset+9<len(rows):
         action=await db.make_action(uid,{'a':'admin_pending','offset':offset+9})
@@ -51,10 +58,14 @@ async def handle(service,token,uid,data):
         await show_pending(service,token,uid,data.get('offset',0));return
     row=next((r for r in await db.pending_bookings() if r['public_id']==data.get('bid')),None)
     if not row:
-        await service.reply_text(token,'💡 この予約は処理済み、または取り消されています。\n「承認待ち」で現在の予約を確認できます。');return
+        # The button carries the booking, so say which one without another lookup.
+        known=summary_of(data.get('label'))
+        await service.reply_text(token,'💡 この予約は処理済み、または取り消されています。'
+                                 +('\n\n'+known if known else '')
+                                 +'\n\n「承認待ち」で現在の予約を確認できます。');return
     decision=data.get('decision')
     if decision=='reject':
-        action=await db.make_action(uid,{'a':'admin_review','bid':row['public_id'],'decision':'reject_confirm'})
+        action=await db.make_action(uid,{'a':'admin_review','bid':row['public_id'],'decision':'reject_confirm','label':review_label(row)})
         back=await db.make_action(uid,{'a':'admin_pending','offset':0})
         await service.reply_flex(token,'予約を見送る前に確認',card('予約を見送りますか？','#64748B',details(row)+[{'type':'text','text':'お客様へ「ご希望の予約をお取りできませんでした」と通知します。カレンダーは変更しません。','wrap':True,'size':'sm'}],[button('見送ってお客様に通知',action),button('戻る・まだ判断しない',back)]));return
     calendar_id=''

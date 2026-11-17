@@ -216,3 +216,32 @@ async def test_approval_of_a_change_shows_the_slot_it_replaces(service,database)
     reply=service.reply_text.call_args.args[1]
     assert '変更前' in reply and '半蔵門店' in reply
     assert (future()-timedelta(days=2)).strftime('%m/%d') in reply
+
+
+async def test_second_press_names_the_booking_without_another_lookup(service,database,monkeypatch):
+    row,tokens,_=await request(database)
+    calendar(service)
+    await service.handle_postback_event(admin_event(data=tokens[0]),user())
+    calls=[]
+    original=database.pending_bookings
+    async def counted():
+        calls.append(1)
+        return await original()
+    monkeypatch.setattr(database,'pending_bookings',counted)
+    await service.handle_postback_event(admin_event(data=tokens[0]),user())
+    reply=service.reply_text.call_args.args[1]
+    assert '処理済み' in reply
+    assert '架空太郎' in reply and future().strftime('%m/%d') in reply and '恵比寿店' in reply
+    # Only the pending scan that already existed; the label avoided a second read.
+    assert len(calls)==1
+
+
+async def test_stale_button_without_a_label_still_answers(service,database):
+    row,tokens,_=await request(database)
+    stale=await database.get_action(tokens[0]['id'],settings.ADMIN_USER_ID)
+    stale.pop('label')
+    token=json.loads(await database.make_action(settings.ADMIN_USER_ID,stale))
+    calendar(service)
+    await service.handle_postback_event(admin_event(data=tokens[0]),user())
+    await service.handle_postback_event(admin_event(data=token),user())
+    assert '処理済み' in service.reply_text.call_args.args[1]
