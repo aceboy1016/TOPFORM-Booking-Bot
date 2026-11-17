@@ -298,6 +298,13 @@ class Database:
             await self._enqueue(conn,'review:'+public_id,row['line_user_id'],json.dumps(result_card(dict(row),state),ensure_ascii=False),'card')
             return True
 
+    async def pending_booking(self,public_id):
+        """One awaiting booking. Acting on a button must not scan the whole queue."""
+        if not public_id: return None
+        async with self.engine.connect() as conn:
+            row=(await conn.execute(select(bookings).where(bookings.c.public_id==str(public_id),bookings.c.status=='provisional'))).mappings().first()
+            return decode(row) if row else None
+
     async def pending_bookings(self):
         async with self.engine.connect() as conn:
             return [decode(r) for r in (await conn.execute(select(bookings).where(bookings.c.status=='provisional').order_by(bookings.c.created_at))).mappings()]

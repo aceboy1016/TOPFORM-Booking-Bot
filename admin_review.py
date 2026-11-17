@@ -56,7 +56,7 @@ async def handle(service,token,uid,data):
         await service.reply_text(token,'この操作は管理者専用です。');return
     if data['a']=='admin_pending':
         await show_pending(service,token,uid,data.get('offset',0));return
-    row=next((r for r in await db.pending_bookings() if r['public_id']==data.get('bid')),None)
+    row=await db.pending_booking(data.get('bid'))
     if not row:
         # The button carries the booking, so say which one without another lookup.
         known=summary_of(data.get('label'))

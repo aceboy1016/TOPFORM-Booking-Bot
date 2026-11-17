@@ -422,5 +422,12 @@ class FirestoreDatabase:
             return True
         return await self._run(operation)
 
+    async def pending_booking(self, public_id):
+        """One awaiting booking, as a single document read rather than a scan."""
+        if not public_id: return None
+        snap = await self.ref('bookings', str(public_id)).get()
+        row = snap.to_dict() if snap.exists else None
+        return decode(row) if row and row.get('status') == 'provisional' else None
+
     async def pending_bookings(self):
         return sorted([decode(r) for r in await self._rows('bookings', 'status', 'provisional')], key=lambda r: r['created_at'])

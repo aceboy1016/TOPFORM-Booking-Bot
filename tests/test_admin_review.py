@@ -232,8 +232,8 @@ async def test_second_press_names_the_booking_without_another_lookup(service,dat
     reply=service.reply_text.call_args.args[1]
     assert '処理済み' in reply
     assert '架空太郎' in reply and future().strftime('%m/%d') in reply and '恵比寿店' in reply
-    # Only the pending scan that already existed; the label avoided a second read.
-    assert len(calls)==1
+    # The label answers it: no queue scan and no second lookup of the booking.
+    assert calls==[]
 
 
 async def test_stale_button_without_a_label_still_answers(service,database):
@@ -244,4 +244,34 @@ async def test_stale_button_without_a_label_still_answers(service,database):
     calendar(service)
     await service.handle_postback_event(admin_event(data=tokens[0]),user())
     await service.handle_postback_event(admin_event(data=token),user())
+    assert '処理済み' in service.reply_text.call_args.args[1]
+
+
+async def test_pending_booking_reads_one_row_not_the_queue(database):
+    first=await database.save_booking('u','ebisu',future().isoformat())
+    await database.save_booking('v','ebisu',(future()+timedelta(days=1)).isoformat())
+    row=await database.get_booking(first,'u')
+    found=await database.pending_booking(row['public_id'])
+    assert found['public_id']==row['public_id'] and found['status']=='provisional'
+    assert await database.pending_booking('no-such-id') is None
+    assert await database.pending_booking(None) is None
+
+
+async def test_pending_booking_ignores_bookings_that_left_the_queue(service,database):
+    row,tokens,_=await request(database)
+    calendar(service)
+    await service.handle_postback_event(admin_event(data=tokens[0]),user())
+    assert (await database.get_booking(row['public_id'],'u'))['status']=='confirmed'
+    assert await database.pending_booking(row['public_id']) is None
+
+
+async def test_review_never_scans_the_pending_queue(service,database,monkeypatch):
+    row,tokens,_=await request(database)
+    calendar(service)
+    async def forbidden():
+        raise AssertionError('承認待ちの全件読み取りが発生している')
+    monkeypatch.setattr(database,'pending_bookings',forbidden)
+    await service.handle_postback_event(admin_event(data=tokens[0]),user())
+    assert (await database.get_booking(row['public_id'],'u'))['status']=='confirmed'
+    await service.handle_postback_event(admin_event(data=tokens[0]),user())
     assert '処理済み' in service.reply_text.call_args.args[1]
