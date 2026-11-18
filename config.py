@@ -108,6 +108,10 @@ ADVANCE_BOOKING_MONTHS = 2  # 2ヶ月先まで予約可
 # インスタンス全体が停止してLINEのWebhookも受けられなくなるため必須。
 GOOGLE_API_TIMEOUT = 15
 
+# 祝日データが尽きる何日前から管理者へ知らせるか。
+# 受付可能な期間へ未登録の年が入る前に気づけるだけの余裕を取る。
+HOLIDAY_DATA_LEAD_DAYS = 90
+
 # 営業時間
 BUSINESS_HOURS = {
     "weekday": {"start": 8, "end": 23},  # 最終枠 22:00

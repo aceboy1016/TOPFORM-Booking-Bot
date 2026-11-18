@@ -2,8 +2,26 @@
 import json
 from datetime import datetime, timedelta
 from linebot.v3.messaging import PushMessageRequest, TextMessage, FlexMessage, FlexContainer
-from booking_rules import JST, as_jst
+from booking_rules import JST, as_jst, uncovered_holiday_years
+from config import settings
 from database import db
+
+async def warn_missing_holidays(now=None):
+    """Tell the administrator before the booking window reaches an unlisted year.
+
+    The outbox key is per year, so this is delivered once however often the
+    container restarts. Returns the years it warned about.
+    """
+    years = uncovered_holiday_years(now)
+    if not years or not settings.ADMIN_USER_ID: return years
+    for year in years:
+        await db.enqueue('holiday-data:' + str(year), settings.ADMIN_USER_ID,
+                         f'⚠️ {year}年の祝日が未登録です。\n\n'
+                         f'このままだと{year}年の祝日が平日扱いになり、'
+                         f'休日の営業時間（9:00〜20:00）ではなく'
+                         f'平日の営業時間（8:00〜23:00）で予約を受け付けてしまいます。\n\n'
+                         f'config.py の HOLIDAYS に{year}年を追加してください。')
+    return years
 
 async def flush_notifications(api,limit=5):
     if api is None: return

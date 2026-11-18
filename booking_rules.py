@@ -3,7 +3,7 @@ import calendar
 import re
 from datetime import datetime, timedelta
 import pytz
-from config import ADVANCE_BOOKING_MONTHS, BUSINESS_HOURS, HOLIDAYS, FORCED_CLOSED_DAYS, SESSION_DURATION, URGENT_CONTACT_DEADLINE_HOURS, STORE_NAMES
+from config import ADVANCE_BOOKING_MONTHS, BUSINESS_HOURS, HOLIDAYS, FORCED_CLOSED_DAYS, HOLIDAY_DATA_LEAD_DAYS, SESSION_DURATION, URGENT_CONTACT_DEADLINE_HOURS, STORE_NAMES
 
 JST = pytz.timezone('Asia/Tokyo')
 
@@ -15,6 +15,19 @@ def booking_limit(now: datetime) -> datetime:
     year, month0 = divmod(now.year * 12 + now.month - 1 + ADVANCE_BOOKING_MONTHS, 12)
     day = min(now.day, calendar.monthrange(year, month0 + 1)[1])
     return now.replace(year=year, month=month0 + 1, day=day, hour=23, minute=59, second=59, microsecond=999999)
+
+def uncovered_holiday_years(now: datetime | None = None, lead_days: int = HOLIDAY_DATA_LEAD_DAYS) -> list[int]:
+    """Years the booking window is about to reach that have no holiday data.
+
+    hours_for falls back to HOLIDAYS.get(year, []), so an unlisted year makes
+    every holiday in it a working day: weekday hours (8-23) get offered on days
+    the trainer does not work. The failure is silent, so say it out loud while
+    there is still time to add the dates.
+    """
+    now = as_jst(now or datetime.now(JST))
+    horizon = booking_limit(now + timedelta(days=lead_days))
+    return [year for year in range(now.year, horizon.year + 1) if not HOLIDAYS.get(year)]
+
 
 def hours_for(day: datetime) -> dict:
     holiday = day.strftime('%Y-%m-%d') in HOLIDAYS.get(day.year, [])

@@ -18,7 +18,7 @@ from sheets_service import sheets_service, SheetsUnavailable
 from database import db, current_event
 from line_service import line_service
 from async_services import google_call
-from notifications import flush_notifications
+from notifications import flush_notifications, warn_missing_holidays
 
 logger=logging.getLogger(__name__)
 
@@ -32,6 +32,11 @@ async def lifespan(app):
         await google_call(sheets_service.fetch_customer_master)
         await line_service.initialize()
         await line_service._get_bookings(force=True)
+        # Missing holiday data degrades quietly, so report it; never block startup.
+        try:
+            years=await warn_missing_holidays()
+            if years: logger.warning('Holiday data missing for %s',years)
+        except Exception: logger.exception('Holiday coverage check failed')
         yield
     finally:
         await line_service.close()
