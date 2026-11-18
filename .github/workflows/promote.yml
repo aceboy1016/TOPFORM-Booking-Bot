@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       revision:
-        description: 'Revision to serve 100% traffic (e.g. topform-booking-bot-00123-abc). Leave blank to only show the current traffic.'
+        description: 'Revision to serve 100% traffic, or "latest" for the newest ready one. Leave blank to only show the current traffic.'
         required: false
         default: ''
 
@@ -38,11 +38,32 @@ jobs:
           gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" \
             --format='table(status.traffic[].revisionName,status.traffic[].percent,status.traffic[].tag)' \
             | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Refuse an unknown revision
+      - name: List recent revisions
+        run: |
+          echo '### Recent revisions' >> "$GITHUB_STEP_SUMMARY"
+          gcloud run revisions list --service "$SERVICE" --project "$PROJECT" --region "$REGION" \
+            --sort-by=~metadata.creationTimestamp --limit=5 \
+            --format='table(metadata.name,status.conditions.filter("type:Ready").extract(status).flatten(),metadata.creationTimestamp)' \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Resolve and verify the revision
         if: inputs.revision != ''
         run: |
+          if [ "$REVISION" = latest ]; then
+            REVISION=$(gcloud run revisions list --service "$SERVICE" --project "$PROJECT" --region "$REGION" \
+              --sort-by=~metadata.creationTimestamp --limit=1 --format='value(metadata.name)')
+            echo "Resolved latest to $REVISION"
+          fi
+          # Never send traffic to a revision that did not come up.
           gcloud run revisions describe "$REVISION" --project "$PROJECT" --region "$REGION" \
-            --format='value(metadata.name)' > /dev/null
+            --format=json > /tmp/revision.json
+          python3 - <<'PY'
+          import json,sys
+          conditions=json.load(open('/tmp/revision.json'))['status']['conditions']
+          ready=next((c for c in conditions if c['type']=='Ready'),None)
+          if not ready or ready['status']!='True':
+              sys.exit('Revision is not Ready: '+json.dumps(ready))
+          PY
+          echo "REVISION=$REVISION" >> "$GITHUB_ENV"
       - name: Send all traffic to the chosen revision
         if: inputs.revision != ''
         run: |
