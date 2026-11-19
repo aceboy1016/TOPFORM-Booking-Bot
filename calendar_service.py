@@ -13,8 +13,12 @@ import json
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from booking_rules import as_jst, booking_limit, slot_error, hours_for
+
+# The reader detects the store from these markers, so the writer uses them too.
+STORE_MARKERS = {"hanzoomon": "(半)", "ebisu": "(恵)"}
 
 class CalendarUnavailable(RuntimeError):
     """A complete, current calendar snapshot could not be obtained."""
@@ -107,7 +111,9 @@ class CalendarService:
 
         credentials = service_account.Credentials.from_service_account_info(
             creds_data,
-            scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+            # events (not readonly): provisional bookings are written onto the
+            # trainer's work calendar so the slot stops being offered at once.
+            scopes=["https://www.googleapis.com/auth/calendar.events"],
         )
         self._credentials = credentials
         # Build is technically blocking but happens only once at startup
@@ -140,6 +146,46 @@ class CalendarService:
                 if not page_token: return events
         except Exception as exc:
             raise CalendarUnavailable("Calendar snapshot is incomplete") from exc
+
+    def hold_slot(self, public_id: str, line_user_id: str, name: str,
+                  store: str, slot: datetime) -> str:
+        """Put a provisional booking on the trainer's work calendar.
+
+        Availability is read from the calendar, so a booking that is not written
+        there keeps being offered to the next member. The title carries the
+        store marker the reader already understands, and the LINE id goes into
+        extendedProperties so the booking is matched by id rather than by name.
+
+        The event id is derived from the booking, so a retry re-sends the same
+        event instead of creating a second hold.
+        """
+        if not self._credentials:
+            raise CalendarUnavailable("Calendar credentials are unavailable")
+        marker = STORE_MARKERS.get(store)
+        if not marker:
+            raise ValueError("Unknown store: " + str(store))
+        slot = as_jst(slot)
+        body = {
+            "id": re.sub(r"[^0-9a-v]", "", public_id.lower()),
+            "summary": marker + (name or "お客様") + "様",
+            "start": {"dateTime": slot.isoformat(), "timeZone": "Asia/Tokyo"},
+            "end": {"dateTime": (slot + timedelta(minutes=SESSION_DURATION)).isoformat(),
+                    "timeZone": "Asia/Tokyo"},
+            "extendedProperties": {"private": {"line_user_id": line_user_id}},
+        }
+        import google_auth_httplib2, httplib2
+        http = google_auth_httplib2.AuthorizedHttp(
+            self._credentials, http=httplib2.Http(timeout=GOOGLE_API_TIMEOUT)
+        )
+        service = build("calendar", "v3", http=http)
+        try:
+            created = service.events().insert(
+                calendarId=CALENDAR_IDS["ishihara_work"], body=body).execute()
+        except HttpError as exc:
+            # 409 means this booking is already held; that is the wanted state.
+            if exc.resp.status == 409: return body["id"]
+            raise
+        return created.get("id", body["id"])
 
     def _transform_event(self, event: dict, store: str, source: str = "work") -> Optional[Booking]:
         """Convert Google Calendar event to Booking object."""

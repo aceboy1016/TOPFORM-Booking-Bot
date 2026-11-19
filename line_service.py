@@ -1057,6 +1057,8 @@ class LINEService:
                     await self.reply_text(reply_token,'同じ日時・店舗の予約は受付済みです。新しい予約は追加していません。\n予約確認から内容をご確認ください。')
                     return
                 booking_id=await db.save_booking(user_id,store,slot_datetime,'provisional',metadata)
+                from calendar_hold import hold
+                await hold(booking_id,user_id,metadata.get('customer_name') or user.get('display_name',''),store,datetime.fromisoformat(slot_datetime))
 
                 from conversation import remember
                 await remember(user_id, booking_id, metadata)
@@ -1646,6 +1648,8 @@ class LINEService:
                 room=user.get('room_pref')
                 if entry['store']!='ebisu' or room not in result.get('rooms_available',[]): room=None
                 bid=await db.save_booking(user_id,entry['store'],slot.isoformat(),'provisional',{'room':room,'customer_name':user.get('display_name','')})
+                from calendar_hold import hold
+                await hold(bid,user_id,user.get('display_name',''),entry['store'],slot)
                 last=bid
                 accepted += 1
                 results.append(f"✅ 仮予約を受け付けました\n📅 {slot.strftime('%m/%d')}（{WEEKDAY_JP[slot.weekday()]}）\n🕐 {slot.strftime('%H:%M')}〜{end.strftime('%H:%M')}\n📍 {STORE_NAMES[entry['store']]}")

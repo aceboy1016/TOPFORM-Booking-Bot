@@ -31,9 +31,9 @@ async def database(tmp_path,monkeypatch):
         if url:
             async with store.engine.begin() as conn: await conn.run_sync(metadata.drop_all)
     await store.init_db()
-    import bulk_room_options, candidate_options, change_pairs
+    import bulk_room_options, candidate_options, change_pairs, calendar_hold
     import database, line_service, booking_actions, booking_view, notifications, schedule_conversation, main, conversation, conversation_extras, admin_review
-    for module in (bulk_room_options,candidate_options,change_pairs,database,line_service,booking_actions,booking_view,notifications,schedule_conversation,main,conversation,conversation_extras,admin_review):
+    for module in (bulk_room_options,candidate_options,change_pairs,calendar_hold,database,line_service,booking_actions,booking_view,notifications,schedule_conversation,main,conversation,conversation_extras,admin_review):
         monkeypatch.setattr(module,'db',store)
     yield store
     if hasattr(store,'collection'):
@@ -49,4 +49,8 @@ def service(monkeypatch):
     s=LINEService()
     s.reply_text=AsyncMock();s.reply_flex=AsyncMock();s.reply_messages=AsyncMock();s.push_text=AsyncMock()
     s._get_bookings=AsyncMock(return_value=BookingData([],[],[]))
+    # Calendar writes are stubbed like the reads and the LINE sends; a test that
+    # cares about the hold replaces this (see tests/test_calendar_hold.py).
+    from calendar_service import calendar_service
+    monkeypatch.setattr(calendar_service,'hold_slot',lambda *a,**k:'stub-event-id')
     return s
