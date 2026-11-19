@@ -1,5 +1,14 @@
 # GitHub Actionsからの配備
 
+> **未完了（2026-11-19時点）。`deploy`ジョブはスキップされ、配備は従来どおり
+> Cloud Buildトリガーが行っています。** 下記のうち残っているのは、
+> サービスアカウントへの`roles/iam.serviceAccountTokenCreator`の付与だけです。
+> サービスアカウント、各種ロール、Workload Identityプールとプロバイダ、
+> GitHubのVariables 2件はすべて設定済みです。
+>
+> 完了させる場合は「3. 残りの設定」のコマンドを実行してください。
+> この設定はbotの動作とは無関係です。未完了でも支障はありません。
+
 テストとデプロイの結果を1か所で確認できるようにするための設定手順です。
 Workload Identity連携を使い、サービスアカウントキーをGitHubへ保存しません。
 
@@ -70,16 +79,28 @@ Variablesで構いません。
 `GCP_WORKLOAD_IDENTITY_PROVIDER`が未設定のうちは`deploy`ジョブは
 スキップされます。設定前にこのワークフローを取り込んでも配備は起きません。
 
-## 3. 動作確認
+## 3. 残りの設定
+
+`roles/iam.workloadIdentityUser`だけではトークンを発行できず、
+`Permission 'iam.serviceAccounts.getAccessToken' denied`で止まります。
+Cloud Shellで次を実行してください。
+
+```sh
+gcloud iam service-accounts add-iam-policy-binding github-deploy@topform-booking-bot.iam.gserviceaccount.com --project=topform-booking-bot --role=roles/iam.serviceAccountTokenCreator --member="principalSet://iam.googleapis.com/projects/622073906655/locations/global/workloadIdentityPools/github/attribute.repository/aceboy1016/TOPFORM-Booking-Bot"
+```
+
+`gcloud`はローカルに入っていないため、[Cloud Shell](https://console.cloud.google.com/?cloudshell=true&project=topform-booking-bot)で実行します。
+
+## 4. 動作確認
 
 1. `main`へ何かpushする（またはActionsから再実行する）。
 2. `Booking regression tests`の`deploy`ジョブが成功することを確認する。
 3. ジョブのSummaryに現在のトラフィック配分が出る。`review`タグのリビジョンが
    新しく増え、トラフィックは旧リビジョンのままであることを確認する。
 
-## 4. Cloud Buildトリガーの停止
+## 5. Cloud Buildトリガーの停止
 
-**3が成功してから**行ってください。先に止めると配備手段が無くなり、
+**4が成功してから**行ってください。先に止めると配備手段が無くなり、
 両方動かしたままだと同じpushで2回ビルドされます。
 
 Cloud Buildのトリガー一覧から、`main`への
