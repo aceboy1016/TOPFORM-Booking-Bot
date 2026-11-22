@@ -2,10 +2,36 @@
 import json
 import re
 import uuid
+from datetime import date, datetime
+from booking_rules import JST
 from database import db
 
+
+def month_prefix(source, day):
+    """The year/month whose `day` the member means for a destination.
+
+    The month comes from the booking being moved, rolled forward while that day
+    is already past: moving a 29 November booking to "1日" means 1 December.
+
+    A day that is earlier than the booking but still ahead of today is left in
+    the booking's own month, which reads a move backwards within the month
+    rather than one into the next. Either is possible from the words alone, and
+    the destination is shown for confirmation before anything is submitted.
+    """
+    today = datetime.now(JST).date()
+    year, month = source.year, source.month
+    for _ in range(2):
+        try:
+            if date(year, month, day) >= today: break
+        except ValueError:
+            pass
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return f'{year}/{month}/'
+
 # Order matters: consume full dates before shorter days and relative expressions.
-DATE = re.compile(r'(?<!\d)(?:\d{4}[/年-]\d{1,2}[/月-]\d{1,2}日?|\d{1,2}[/月]\d{1,2}日?)|(?:(?:再来週|来週|今週)の?)?\d{1,2}日|(?:再来週|来週|今週)?の?[月火水木金土日]曜日?|明後日|あさって|明日|今日')
+# "12の分" names an existing booking by day without saying 日; without it the
+# destination date is the only mention and gets searched for as the source.
+DATE = re.compile(r'(?<!\d)(?:\d{4}[/年-]\d{1,2}[/月-]\d{1,2}日?|\d{1,2}[/月]\d{1,2}日?)|(?<!\d)\d{1,2}日?の(?:分|方|ほう)|(?:(?:再来週|来週|今週)の?)?\d{1,2}日|(?:再来週|来週|今週)?の?[月火水木金土日]曜日?|明後日|あさって|明日|今日')
 DEFERRED = re.compile(r'未定|決まって(?:い)?ない|まだ決め|決まったら|(?<!明)後日|また連絡|改めて連絡|あとで|後で')
 CHANGE = re.compile(r'変更|ずらし|ずらす|振替|振り替')
 
@@ -104,10 +130,12 @@ async def route(service,event,user,session):
     elif re.search(r'時間(?:の)?(?:変更|を変)',text) and len(entries)==1 and not service._extract_time(desired or ''):
         desired=entries[0]['dt'].strftime('%Y-%m-%d')
     elif desired:
-        # Bare destination day inherits the explicitly stated source month/year.
+        # Bare destination day inherits the source month/year, rolled forward
+        # when that day has already passed (see month_prefix).
         source_dates=service._parse_multiple_dates(source)
-        if source_dates and re.match(r'^\d{1,2}日',desired):
-            desired=source_dates[0].strftime('%Y/%m/')+desired
+        day=re.match(r'^(\d{1,2})日',desired)
+        if source_dates and day:
+            desired=month_prefix(source_dates[0],int(day[1]))+desired
         # "8/9変更可能？16時恵比寿" is a same-day time/store change.
         if not service._parse_multiple_dates(desired) and service._extract_time(desired):
             if len(entries)==1: desired=entries[0]['dt'].strftime('%Y-%m-%d')+' '+desired

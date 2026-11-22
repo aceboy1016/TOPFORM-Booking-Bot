@@ -23,10 +23,12 @@ def normalize(text):
 
 def mentioned_dates(text):
     """Partial dates identify existing bookings; never roll them into next year."""
-    pattern = r'(?:(\d{4})[/年-])?(\d{1,2})[/月](\d{1,2})日?|(?<!\d)(\d{1,2})日'
+    # "12の分" names a booking by day without saying 日.
+    pattern = (r'(?:(\d{4})[/年-])?(\d{1,2})[/月](\d{1,2})日?|(?<!\d)(\d{1,2})日'
+               r'|(?<!\d)(\d{1,2})日?の(?:分|方|ほう)')
     text=re.sub(r'(\d{4})-(\d{2})-(\d{2})',r'\1/\2/\3',text)
     return [(int(m[1]) if m[1] else None, int(m[2]) if m[2] else None,
-             int(m[3] or m[4])) for m in re.finditer(pattern, text)]
+             int(m[3] or m[4] or m[5])) for m in re.finditer(pattern, text)]
 
 
 def matches_date(booking, dates):
