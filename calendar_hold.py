@@ -4,11 +4,12 @@ Availability is read from the calendar alone, so until a booking appears there
 the same slot keeps being offered to the next member. Writing the hold at
 acceptance closes that window.
 
-A failed write never loses the booking: the row is already stored, and the
-administrator is told so the slot can be entered by hand.
+Nothing here may raise or stay silent: the booking is already stored by the
+time this runs, so a failure must neither break the reply to the member nor
+pass unnoticed by the administrator.
 """
+import hashlib
 import logging
-from datetime import datetime
 from async_services import google_call
 from booking_rules import as_jst
 from calendar_service import calendar_service
@@ -18,29 +19,37 @@ from database import db
 logger = logging.getLogger(__name__)
 
 
-async def hold(booking_id, line_user_id, name, store, slot):
+def event_id(line_user_id, store, slot):
+    """A stable id for this booking's hold.
+
+    Derived from the booking itself rather than read back from storage, so a
+    retry re-sends the same event and no lookup can fail on the way.
+    """
+    seed = '\x00'.join((line_user_id, store, as_jst(slot).isoformat()))
+    return hashlib.sha256(seed.encode()).hexdigest()[:32]
+
+
+async def hold(line_user_id, name, store, slot):
     """Hold the slot on the calendar. Returns the event id, or None on failure."""
-    row = await db.get_booking(booking_id, line_user_id)
-    if not row:
-        logger.warning('Cannot hold slot: booking %s not found', booking_id)
-        return None
     try:
-        event_id = await google_call(calendar_service.hold_slot, row['public_id'],
-                                     line_user_id, name, store, as_jst(slot))
+        slot = as_jst(slot)
+        return await google_call(calendar_service.hold_slot,
+                                 event_id(line_user_id, store, slot),
+                                 line_user_id, name, store, slot)
     except Exception:
-        logger.exception('Calendar hold failed for booking %s', row['public_id'])
-        await _warn_admin(row['public_id'], name, store, slot)
+        logger.exception('Calendar hold failed for %s %s %s', line_user_id, store, slot)
+        await _warn_admin(name, store, slot)
         return None
-    return event_id
 
 
-async def _warn_admin(public_id, name, store, slot):
+async def _warn_admin(name, store, slot):
     """The slot is still being offered to others until someone enters it."""
     if not settings.ADMIN_USER_ID: return
-    slot = as_jst(slot)
     try:
+        slot = as_jst(slot)
         await db.enqueue(
-            'hold-failed:' + public_id, settings.ADMIN_USER_ID,
+            'hold-failed:' + event_id(settings.ADMIN_USER_ID, store, slot),
+            settings.ADMIN_USER_ID,
             '⚠️ カレンダーへの自動登録に失敗しました。\n\n'
             '👤 ' + str(name or 'お客様') + ' 様\n'
             '📅 ' + slot.strftime('%m/%d') + '（' + '月火水木金土日'[slot.weekday()] + '）'
@@ -49,4 +58,4 @@ async def _warn_admin(public_id, name, store, slot):
             'この枠は他のお客様にも空きとして案内され続けます。\n'
             '手動でカレンダーに登録してください。')
     except Exception:
-        logger.exception('Could not warn the administrator about %s', public_id)
+        logger.exception('Could not warn the administrator about %s %s', store, slot)

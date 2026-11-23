@@ -98,3 +98,28 @@ async def test_the_conversational_flow_also_holds_the_slot(service, database, ca
     assert len(await database.get_user_bookings('u')) == 1
     assert len(calendar_api) == 1, '対話フローの仮予約がカレンダーに入っていない'
     assert calendar_api[0]['body']['summary'] == '(恵)架空太郎様'
+
+
+async def test_a_hold_never_breaks_the_booking_it_belongs_to(service, database, monkeypatch):
+    """The booking is already stored: a calendar problem must not reach the member."""
+    from calendar_hold import hold
+    monkeypatch.setattr(settings, 'ADMIN_USER_ID', 'audit-admin')
+    def explode(*a, **k): raise RuntimeError('calendar down')
+    monkeypatch.setattr(calendar_service, 'hold_slot', explode)
+    assert await hold('u', '架空太郎', 'hanzoomon', future()) is None
+    warnings = [n for n in await database.notification_backlog()
+                if n['recipient'] == 'audit-admin' and '自動登録に失敗' in n['body']]
+    assert len(warnings) == 1, '失敗が管理者に伝わっていない'
+
+
+def test_the_hold_id_comes_from_the_booking_itself():
+    """No lookup stands between accepting a booking and holding its slot."""
+    from calendar_hold import event_id
+    slot = future()
+    same = event_id('u', 'ebisu', slot)
+    assert same == event_id('u', 'ebisu', slot)
+    assert same != event_id('u', 'hanzoomon', slot)
+    assert same != event_id('other', 'ebisu', slot)
+    assert same != event_id('u', 'ebisu', slot + timedelta(hours=1))
+    # Google only accepts lowercase base32hex ids of at least five characters.
+    assert len(same) >= 5 and same.isalnum() and same.islower()

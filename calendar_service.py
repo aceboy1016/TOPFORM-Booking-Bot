@@ -147,7 +147,7 @@ class CalendarService:
         except Exception as exc:
             raise CalendarUnavailable("Calendar snapshot is incomplete") from exc
 
-    def hold_slot(self, public_id: str, line_user_id: str, name: str,
+    def hold_slot(self, event_id: str, line_user_id: str, name: str,
                   store: str, slot: datetime) -> str:
         """Put a provisional booking on the trainer's work calendar.
 
@@ -166,7 +166,7 @@ class CalendarService:
             raise ValueError("Unknown store: " + str(store))
         slot = as_jst(slot)
         body = {
-            "id": re.sub(r"[^0-9a-v]", "", public_id.lower()),
+            "id": re.sub(r"[^0-9a-v]", "", event_id.lower()),
             "summary": marker + (name or "お客様") + "様",
             "start": {"dateTime": slot.isoformat(), "timeZone": "Asia/Tokyo"},
             "end": {"dateTime": (slot + timedelta(minutes=SESSION_DURATION)).isoformat(),
