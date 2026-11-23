@@ -13,7 +13,7 @@ import logging
 from async_services import google_call
 from booking_rules import as_jst
 from calendar_service import calendar_service
-from config import settings, STORE_NAMES
+from config import settings, STORE_NAMES, HOLD_SLOTS_ON_CALENDAR
 from database import db
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,9 @@ def event_id(line_user_id, store, slot):
 
 async def hold(line_user_id, name, store, slot):
     """Hold the slot on the calendar. Returns the event id, or None on failure."""
+    # Switched off while the calendar cannot be written to: warning on every
+    # booking tells the administrator nothing they do not already know.
+    if not HOLD_SLOTS_ON_CALENDAR: return None
     try:
         slot = as_jst(slot)
         return await google_call(calendar_service.hold_slot,

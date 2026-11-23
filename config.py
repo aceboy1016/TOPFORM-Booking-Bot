@@ -108,6 +108,12 @@ ADVANCE_BOOKING_MONTHS = 2  # 2ヶ月先まで予約可
 # インスタンス全体が停止してLINEのWebhookも受けられなくなるため必須。
 GOOGLE_API_TIMEOUT = 15
 
+# 仮予約を受け付けた時点でカレンダーへ書き込むかどうか。
+# 書き込み先の j.ishihara@topform.jp は会社のカレンダーで、サービス
+# アカウントに編集権限を付けられないため停止している。権限が付いたら
+# True に戻すだけで再開できる（calendar_hold.py は変更不要）。
+HOLD_SLOTS_ON_CALENDAR = False
+
 # 祝日データが尽きる何日前から管理者へ知らせるか。
 # 受付可能な期間へ未登録の年が入る前に気づけるだけの余裕を取る。
 HOLIDAY_DATA_LEAD_DAYS = 90

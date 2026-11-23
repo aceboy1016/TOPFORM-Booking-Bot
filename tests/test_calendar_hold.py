@@ -9,6 +9,13 @@ from config import settings
 from tests.test_flows import event, user, future, customer
 
 
+@pytest.fixture(autouse=True)
+def enabled(monkeypatch):
+    """These tests describe the hold itself, so they switch it on explicitly."""
+    import calendar_hold
+    monkeypatch.setattr(calendar_hold, 'HOLD_SLOTS_ON_CALENDAR', True)
+
+
 @pytest.fixture
 def calendar_api(monkeypatch):
     """Capture what would be written to Google Calendar."""
@@ -123,3 +130,18 @@ def test_the_hold_id_comes_from_the_booking_itself():
     assert same != event_id('u', 'ebisu', slot + timedelta(hours=1))
     # Google only accepts lowercase base32hex ids of at least five characters.
     assert len(same) >= 5 and same.isalnum() and same.islower()
+
+
+async def test_switched_off_it_writes_nothing_and_says_nothing(service, database, monkeypatch):
+    """While the calendar cannot be written to, bookings go through in silence."""
+    import calendar_hold
+    monkeypatch.setattr(calendar_hold, 'HOLD_SLOTS_ON_CALENDAR', False)
+    monkeypatch.setattr(settings, 'ADMIN_USER_ID', 'audit-admin')
+    def explode(*a, **k): raise AssertionError('カレンダーに書き込もうとしている')
+    monkeypatch.setattr(calendar_service, 'hold_slot', explode)
+    slot = future().replace(hour=17)
+    await service.handle_text_message(event(
+        f'【予約希望】\n{slot:%Y/%m/%d} 17:00〜18:00 @半蔵門'), user())
+    assert len(await database.get_user_bookings('u')) == 1, '予約は通常どおり受け付ける'
+    assert [n for n in await database.notification_backlog()
+            if '自動登録に失敗' in n['body']] == [], '失敗警告が出ている'
