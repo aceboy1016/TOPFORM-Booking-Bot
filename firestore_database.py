@@ -323,6 +323,29 @@ class FirestoreDatabase:
         row = await self._get('action_tokens', ident)
         return json.loads(row['payload']) if row and row['line_user_id'] == user_id and row['expires_at'] >= now_iso() else None
 
+    async def add_slot_watch(self,ident,line_user_id,payload):
+        """Remember a day to tell the administrator about once it opens up."""
+        async def operation(unit):
+            ref=self.ref('waitlist_requests',ident)
+            if await unit.get(ref): return False
+            unit.put(ref,dict(id=ident,line_user_id=line_user_id,
+                              payload=json.dumps(payload,ensure_ascii=False),
+                              state='watching',updated_at=now_iso()))
+            return True
+        return await self._run(operation)
+
+    async def open_slot_watches(self,limit=100):
+        return [decode(r) for r in await self._rows('waitlist_requests','state','watching')][:limit]
+
+    async def close_slot_watch(self,ident):
+        async def operation(unit):
+            ref=self.ref('waitlist_requests',ident)
+            row=await unit.get(ref)
+            if not row or row['state']!='watching': return False
+            row.update(state='reported',updated_at=now_iso());unit.put(ref,row)
+            return True
+        return await self._run(operation)
+
     async def user_waitlists(self,uid):
         return [r for r in await self._rows('waitlist_requests','line_user_id',uid) if r['state'] in ('waiting','offered')][:100]
 

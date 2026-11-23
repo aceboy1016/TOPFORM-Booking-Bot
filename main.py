@@ -138,8 +138,12 @@ async def trigger_check_waitlist():
 
 @app.post('/api/notifications/retry',dependencies=[Depends(require_admin)])
 async def retry_notifications():
+    # Watched days are checked here rather than on their own schedule: this
+    # already runs every few minutes, and an opening is not urgent to the minute.
+    from slot_watch import check
+    reported=await check(line_service)
     await flush_notifications(line_service._api)
-    return {'status':'processed'}
+    return {'status':'processed','slots_reported':reported}
 
 @app.get('/api/notifications',dependencies=[Depends(require_admin)])
 async def notification_backlog():

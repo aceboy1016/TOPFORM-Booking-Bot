@@ -463,6 +463,9 @@ class LINEService:
         data['filters']=filters_from(text,data.get('filters'))
         data['picker_id'] = uuid.uuid4().hex
         data['picker_filter'] = text
+        # Said while asking, used after the answer: see slot_watch.
+        from slot_watch import wants_to_wait
+        data['waiting'] = wants_to_wait(text)
         data['picker_dates'] = [d.strftime('%Y-%m-%d') for d in dates[:63]]
         data['store'] = data.get('store') or 'both'
         for key in ('time', 'pending_time', 'room', 'requested_time', 'pending_datetime_text'):
@@ -496,6 +499,7 @@ class LINEService:
         displayed=[]
         displayed_slots=[]
         unavailable=[]
+        missed=[]
         rows=[(date,store,note) for date in dates[date_offset:date_offset+(1 if only_store else 4)] for store in stores]
         def slots_for(date,store):
             return matching(get_available_slots(datetime.strptime(date,'%Y-%m-%d'),store,snapshot),data.get('filters',filters_from(data.get('picker_filter',''))))
@@ -530,6 +534,7 @@ class LINEService:
             slots = slots_for(date,store)
             if not slots:
                 unavailable.append(f'📅 {day:%m/%d}（{WEEKDAY_JP[day.weekday()]}）📍 {STORE_NAMES[store]}')
+                missed.append((date,store))
                 continue
             body = [{'type': 'text', 'text': '📅 '+day.strftime('%m/%d')+'（'+WEEKDAY_JP[day.weekday()]+'）', 'weight': 'bold', 'size': 'lg'},
                     {'type': 'text', 'text': '📍 '+STORE_NAMES[store], 'margin': 'md'},
@@ -575,6 +580,11 @@ class LINEService:
         if cards:
             messages.append(FlexMessage(alt_text='📅 空き時間を選んで予約の確認へ😊', contents=FlexContainer.from_dict({'type':'carousel','contents':cards})))
         await self.reply_messages(token, messages)
+        # Only after the member has been answered, and only if they said they
+        # would wait: the administrator hears when one of these days opens.
+        if missed and data.get('waiting'):
+            from slot_watch import remember
+            await remember(uid, data.get('customer_name') or '', missed)
 
     async def _handle_date_query(
         self, reply_token: str, user_id: str, target_date: datetime

@@ -220,6 +220,21 @@ class Database:
             row=(await conn.execute(select(actions).where(actions.c.id==ident,actions.c.line_user_id==user_id,actions.c.expires_at>=now_iso()))).mappings().first()
             return json.loads(row['payload']) if row else None
 
+    async def add_slot_watch(self,ident,line_user_id,payload):
+        """Remember a day to tell the administrator about once it opens up."""
+        async with self.engine.begin() as conn:
+            res=await conn.execute(self.insert(waitlist).values(id=ident,line_user_id=line_user_id,payload=json.dumps(payload,ensure_ascii=False),state='watching',updated_at=now_iso()).on_conflict_do_nothing(index_elements=['id']))
+            return bool(res.rowcount)
+
+    async def open_slot_watches(self,limit=100):
+        async with self.engine.connect() as conn:
+            return [decode(r) for r in (await conn.execute(select(waitlist).where(waitlist.c.state=='watching').limit(limit))).mappings()]
+
+    async def close_slot_watch(self,ident):
+        async with self.engine.begin() as conn:
+            res=await conn.execute(update(waitlist).where(waitlist.c.id==ident,waitlist.c.state=='watching').values(state='reported',updated_at=now_iso()))
+            return bool(res.rowcount)
+
     async def user_waitlists(self,uid):
         async with self.engine.connect() as conn:
             return [dict(r) for r in (await conn.execute(select(waitlist).where(waitlist.c.line_user_id==uid,waitlist.c.state.in_(['waiting','offered'])).limit(100))).mappings()]
