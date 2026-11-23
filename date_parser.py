@@ -5,11 +5,33 @@ import unicodedata
 from datetime import datetime, timedelta
 from booking_rules import JST, as_jst
 
+# Members list days against one month: "11.25.27.30", "11/25,27,30", "25,27,30日".
+# Read literally only the first date survives and the rest are silently dropped,
+# so each listed day is written out in full before anything else is read.
+# A trailing day that leads its own date ("11/25,12/3") is left for the normal
+# patterns, and a time ("11/25,14:00") is never taken for a day.
+_MORE_DAYS = r'(?:\s*[.,、・/]\s*\d{1,2}日?(?![/月:：\d]))+'
+_ISO_LIST = re.compile(r'(?<!\d)(\d{4})[/年-](\d{1,2})[/月-](\d{1,2})日?(' + _MORE_DAYS + r')')
+_MONTH_LIST = re.compile(r'(?<![\d/年-])(\d{1,2})[/月.](\d{1,2})日?(' + _MORE_DAYS + r')')
+_DAY_LIST = re.compile(r'(?<![\d/月.])(\d{1,2})((?:\s*[.,、・]\s*\d{1,2}(?![/月:：\d]))+)日')
+
+
+def expand_day_lists(text: str) -> str:
+    """Write every day of a list out as its own date."""
+    def spell(prefix, first, rest, suffix=''):
+        days = [first] + re.findall(r'\d{1,2}', rest)
+        return ' '.join(prefix + day + suffix for day in days)
+    text = _ISO_LIST.sub(lambda m: spell(f'{m[1]}/{m[2]}/', m[3], m[4]), text)
+    text = _MONTH_LIST.sub(lambda m: spell(f'{m[1]}/', m[2], m[3]), text)
+    return _DAY_LIST.sub(lambda m: spell('', m[1], m[2], '日'), text)
+
+
 def parse_dates(text: str, now: datetime | None = None) -> list[datetime]:
     now = as_jst(now or datetime.now(JST))
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     text = unicodedata.normalize('NFKC', text)
     text = re.sub(r'((?:\d{4}[/年-])?\d{1,2}[/月.-]\d{1,2}日?)\s*(?:[（(]?[月火水木金土日]曜(?:日)?[）)]?|[（(][月火水木金土日][）)])', r'\1', text)
+    text = expand_day_lists(text)
     dates = set()
     def add(y, m, d):
         try: dates.add(JST.localize(datetime(y, m, d)))
