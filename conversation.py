@@ -14,7 +14,9 @@ from booking_actions import resolve_booking, cancellation_confirmation, cancel_b
 
 CANCEL = r'キャンセル|取り消|取消'
 NEGATIVE = r'取り消さない|取り消さなく|取り消しません|(?:キャンセル|取り消し?|取消)(?:は)?(?:しない|しなく|しません|せず|不要)|残し|そのまま'
-CHANGE = r'変更|ずらし|ずらす'
+# One vocabulary for both routers: a word that means "move my booking" here
+# has to mean it there too, or the two disagree about the same message.
+from schedule_conversation import CHANGE_WORDS as CHANGE
 
 
 def normalize(text):

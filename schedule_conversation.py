@@ -33,7 +33,12 @@ def month_prefix(source, day):
 # destination date is the only mention and gets searched for as the source.
 DATE = re.compile(r'(?<!\d)(?:\d{4}[/年-]\d{1,2}[/月-]\d{1,2}日?|\d{1,2}[/月]\d{1,2}日?)|(?<!\d)\d{1,2}日?の(?:分|方|ほう)|(?:(?:再来週|来週|今週)の?)?\d{1,2}日|(?:再来週|来週|今週)?の?[月火水木金土日]曜日?|明後日|あさって|明日|今日')
 DEFERRED = re.compile(r'未定|決まって(?:い)?ない|まだ決め|決まったら|(?<!明)後日|また連絡|改めて連絡|あとで|後で')
-CHANGE = re.compile(r'変更|ずらし|ずらす|振替|振り替')
+# Moving a booking is rarely called 変更. Read without these, "明日の予約、
+# 時間前倒して良いですか？" is a brand new request and the member ends up
+# holding two. 早め only counts as a verb: 「早めに予約したい」 is a new booking.
+CHANGE_WORDS = (r'変更|ずらし|ずらす|振替|振り替|前倒|後ろ倒|繰り?上げ|繰り?下げ'
+                r'|早め(?:て|る|たい|られ)|遅らせ')
+CHANGE = re.compile(CHANGE_WORDS)
 
 
 def date_mentions(text):
